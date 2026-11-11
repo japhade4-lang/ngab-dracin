@@ -138,6 +138,7 @@ export default function VideoPlayer({
     const stream = resolveStreamUrl(activeUrl);
     setHasError(false);
     setIsLoading(true);
+    const safetyTimer = setTimeout(() => setIsLoading(false), 2000);
 
     if (hlsRef.current) {
       hlsRef.current.destroy();
@@ -172,6 +173,21 @@ export default function VideoPlayer({
       }
     } else {
       video.src = stream;
+      video.load();
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => {
+            setIsPlaying(true);
+            setIsLoading(false);
+          })
+          .catch(() => {
+            setIsPlaying(false);
+            setIsLoading(false);
+          });
+      } else {
+        setIsLoading(false);
+      }
     }
 
     const handleLoadedMetadata = () => {
@@ -226,6 +242,7 @@ export default function VideoPlayer({
       video.removeEventListener('ended', handleEnded);
       video.removeEventListener('error', handleError);
 
+      clearTimeout(safetyTimer);
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
@@ -354,8 +371,8 @@ export default function VideoPlayer({
         className="h-full w-full object-contain cursor-pointer bg-black"
       />
 
-      {/* Loading Spinner */}
-      {isLoading && !hasError && (
+      {/* Loading Spinner (only while actively playing or buffering) */}
+      {isLoading && isPlaying && !hasError && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 pointer-events-none z-20">
           <Loader2 className="h-12 w-12 text-rose-500 animate-spin mb-2" />
           <p className="text-xs font-semibold text-gray-300">Memuat Video Episode {episodeNumber}...</p>
@@ -391,7 +408,7 @@ export default function VideoPlayer({
       )}
 
       {/* Center Big Play Button if Paused */}
-      {!isPlaying && !isLoading && !hasError && (
+      {!isPlaying && !hasError && (
         <div
           onClick={togglePlay}
           className="absolute inset-0 flex flex-col items-center justify-center bg-black/40 cursor-pointer backdrop-blur-[2px] transition-all z-10"

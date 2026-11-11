@@ -47,39 +47,12 @@ export default function WatchScreenClient({
   const [isDownloading, setIsDownloading] = useState(false);
   const [licenseKey, setLicenseKey] = useState('');
 
-  // Check for client-side Dracin API key and fetch genuine stream if available
+  // Synchronize active video URL directly from genuine streamData
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const savedKey = localStorage.getItem('dracin_api_key');
-      if (savedKey) {
-        setIsLicensed(true);
-        setLicenseKey(savedKey);
-        // Request licensed stream via Dracin API proxy
-        fetch(
-          `/api/dracin/stream?source=${encodeURIComponent(drama.source)}&dramaId=${encodeURIComponent(
-            drama.id
-          )}&episode=${currentEpisodeNumber}`,
-          {
-            headers: {
-              'x-api-key': savedKey,
-            },
-          }
-        )
-          .then((res) => res.json())
-          .then((data) => {
-            if (data && data.success && data.streamUrl) {
-              setCurrentVideoUrl(data.streamUrl);
-            }
-          })
-          .catch((err) => {
-            console.warn('[Dracin API] Re-fetch error:', err);
-          });
-      } else {
-        setIsLicensed(false);
-        setCurrentVideoUrl(streamData.videoUrl || '');
-      }
+    if (streamData?.videoUrl) {
+      setCurrentVideoUrl(streamData.videoUrl);
     }
-  }, [drama.source, drama.id, currentEpisodeNumber, streamData.videoUrl]);
+  }, [streamData?.videoUrl, currentEpisodeNumber]);
 
   const toggleFavorite = () => {
     if (bookmarked) {
@@ -206,6 +179,12 @@ export default function WatchScreenClient({
             </div>
           </div>
 
+          {/* Online Streaming Notice */}
+          <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-300">
+            <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse flex-shrink-0" />
+            <span><strong>Streaming Langsung di Web:</strong> Klik tombol Play di layar video untuk memutar langsung secara online tanpa perlu mendownload apa pun.</span>
+          </div>
+
           {/* Navigation Controls: Prev / Next / Download / Favorite buttons */}
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white/5 border border-white/5 p-3 sm:p-4">
             <div className="flex items-center gap-2">
@@ -245,7 +224,7 @@ export default function WatchScreenClient({
                 ) : (
                   <Download className="h-4 w-4 text-rose-400" />
                 )}
-                <span>{isDownloading ? 'Menyiapkan...' : 'Unduh Episode'}</span>
+                <span>{isDownloading ? 'Menyiapkan...' : 'Simpan Offline (Opsional)'}</span>
               </button>
 
               {/* Bookmark Button */}
