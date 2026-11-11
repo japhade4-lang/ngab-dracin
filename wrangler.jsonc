@@ -1,0 +1,33 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"main": ".open-next/worker.js",
+	"name": "ngab-dracin",
+	"compatibility_date": "2026-11-10",
+	"compatibility_flags": [
+		"nodejs_compat",
+		"global_fetch_strictly_public"
+	],
+	"assets": {
+		"directory": ".open-next/assets",
+		"binding": "ASSETS"
+	},
+	"services": [
+		{
+			"binding": "WORKER_SELF_REFERENCE",
+			"service": "ngab-dracin"
+		}
+	],
+	"images": {
+		"binding": "IMAGES"
+	},
+	"vars": {
+		"DRAMABUZZ_KEY": "B6860FC6979E745EF0C85B5E3496B5D2",
+		"NEXT_PUBLIC_DRAMABUZZ_KEY": "B6860FC6979E745EF0C85B5E3496B5D2"
+	},
+	"routes": [
+		{
+			"pattern": "ceritosingkek.my.id",
+			"custom_domain": true
+		}
+	]
+}
