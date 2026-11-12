@@ -147,38 +147,6 @@ export default function WatchScreenClient({
             onActiveUrlChange={setCurrentVideoUrl}
           />
 
-          {/* Dramabuzz API Integration Banner */}
-          <div className="rounded-xl border p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-gradient-to-r from-gray-900 via-gray-900/90 to-gray-900 border-white/10 shadow-sm">
-            <div className="flex items-center gap-2.5">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/20 text-emerald-400">
-                <ShieldCheck className="h-5 w-5" />
-              </div>
-              <div>
-                <p className="text-xs font-bold text-white flex items-center gap-1.5">
-                  <span>Dramabuzz API Ecosystem</span>
-                  <span className="text-[10px] bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-500/30">
-                    Lisensi Aktif: B6860...B5D2
-                  </span>
-                </p>
-                <p className="text-[11px] text-gray-400">
-                  Terhubung langsung ke CDN Resmi Akamai (DramaBox & ShortMax). Video asli HD 1080p & 720p dengan Sulih Suara Indonesia.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <a
-                href="https://api.dramabuzz.sbs/api/status?key=B6860FC6979E745EF0C85B5E3496B5D2"
-                target="_blank"
-                rel="noreferrer"
-                className="flex items-center gap-1 text-[11px] font-semibold text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 px-3 py-1.5 rounded-lg border border-emerald-500/20 transition-colors"
-              >
-                <span>Status 44 Platform</span>
-                <ExternalLink className="h-3 w-3" />
-              </a>
-            </div>
-          </div>
-
           {/* Online Streaming Notice */}
           <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-300">
             <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse flex-shrink-0" />

@@ -447,101 +447,10 @@ export default function VideoPlayer({
               <span className="hidden sm:inline">Unduh MP4</span>
             </button>
 
-            {/* Quick API Key / Custom Stream Button */}
-            <button
-              onClick={() => setShowApiModal(true)}
-              className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/10 hover:bg-white/20 border border-white/10 text-xs font-semibold text-gray-200 transition-colors"
-              title="Pengaturan Dramabuzz API & URL Video"
-            >
-              <KeyRound className="h-3.5 w-3.5 text-emerald-400" />
-              <span className="hidden sm:inline">Dramabuzz API / Ganti Sumber</span>
-            </button>
+
           </div>
         </div>
       </div>
-
-      {/* API Key & Custom URL Modal */}
-      {showApiModal && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
-          <div className="w-full max-w-md rounded-2xl bg-gray-900 border border-white/10 p-5 space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-white/10 pb-3">
-              <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                <Settings className="h-4 w-4 text-emerald-400" />
-                Sumber Video & Dramabuzz API
-              </h3>
-              <button
-                onClick={() => setShowApiModal(false)}
-                className="text-gray-400 hover:text-white text-xs font-bold px-2 py-1"
-              >
-                ✕
-              </button>
-            </div>
-
-            {/* Custom Direct Stream URL */}
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-gray-300">
-                Putar Langsung URL Video (MP4 / HLS .m3u8):
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="https://.../video.mp4 atau master.m3u8"
-                  value={customStreamInput}
-                  onChange={(e) => setCustomStreamInput(e.target.value)}
-                  className="flex-1 rounded-xl bg-white/5 border border-white/10 px-3 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-rose-500"
-                />
-                <button
-                  onClick={applyCustomUrl}
-                  className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-xs font-bold text-white transition-all"
-                >
-                  Terapkan
-                </button>
-              </div>
-              <p className="text-[11px] text-gray-400">
-                Mendukung tautan CDN langsung Akamai (DramaBox, ShortMax) atau server video lainnya.
-              </p>
-            </div>
-
-            {/* Dramabuzz API License Key */}
-            <div className="space-y-1.5 pt-2 border-t border-white/5">
-              <label className="text-xs font-semibold text-gray-300 flex items-center justify-between">
-                <span>Dramabuzz License Key:</span>
-                <span className="text-emerald-400 text-[10px] font-semibold">
-                  ✓ Lisensi Sistem Aktif (44 Platform)
-                </span>
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="B6860FC6979E745EF0C85B5E3496B5D2"
-                  value={apiKeyInput}
-                  onChange={(e) => setApiKeyInput(e.target.value)}
-                  className="flex-1 rounded-xl bg-white/5 border border-white/10 px-3 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-emerald-500"
-                />
-                <button
-                  onClick={saveApiKey}
-                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white transition-all flex items-center gap-1"
-                >
-                  {apiKeySaved ? <Check className="h-3.5 w-3.5 text-white" /> : 'Simpan'}
-                </button>
-              </div>
-              <p className="text-[11px] text-gray-400">
-                Lisensi aktif: <code className="text-emerald-400 font-mono">B6860FC6979E745EF0C85B5E3496B5D2</code>
-              </p>
-            </div>
-
-            <div className="flex justify-end pt-2">
-              <button
-                onClick={() => setShowApiModal(false)}
-                className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-semibold text-gray-200 transition-colors"
-              >
-                Tutup
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Bottom Controls Overlay */}
       <div
         className={`absolute bottom-0 left-0 right-0 p-3 sm:p-5 bg-gradient-to-t from-black/95 via-black/70 to-transparent transition-opacity duration-300 z-20 ${
