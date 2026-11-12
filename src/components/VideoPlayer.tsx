@@ -150,10 +150,12 @@ export default function VideoPlayer({
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
-          backBufferLength: 90,
-          maxBufferLength: 30,
-          maxMaxBufferLength: 60,
-          maxBufferSize: 60 * 1000 * 1000,
+          backBufferLength: 30,
+          maxBufferLength: 15,
+          maxMaxBufferLength: 30,
+          maxBufferSize: 30 * 1000 * 1000,
+          fragLoadingTimeOut: 20000,
+          manifestLoadingTimeOut: 20000,
         });
         hls.loadSource(stream);
         hls.attachMedia(video);

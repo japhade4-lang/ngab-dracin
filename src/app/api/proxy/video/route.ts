@@ -40,6 +40,49 @@ export async function GET(req: NextRequest) {
     responseHeaders.set('Accept-Ranges', 'bytes');
 
     const contentType = upstreamResponse.headers.get('content-type') || 'video/mp4';
+
+    // If this is an HLS playlist (.m3u8), rewrite relative segment paths to proxy URLs
+    if (url.includes('.m3u8') || contentType.includes('mpegurl') || contentType.includes('application/x-mpegURL')) {
+      const playlistText = await upstreamResponse.text();
+      const parsedUrl = new URL(url);
+      const basePath = url.substring(0, url.lastIndexOf('/') + 1);
+      const searchParams = parsedUrl.search; // preserves ?auth_key=...
+
+      const rewrittenLines = playlistText.split('\n').map((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return line;
+
+        // Header comments and directives
+        if (trimmed.startsWith('#')) {
+          if (trimmed.includes('URI="')) {
+            return trimmed.replace(/URI="([^"]+)"/, (_, uri) => {
+              const fullKeyUrl = uri.startsWith('http') ? uri : `${basePath}${uri}${searchParams}`;
+              return `URI="/api/proxy/video?url=${encodeURIComponent(fullKeyUrl)}&source=${source}"`;
+            });
+          }
+          return line;
+        }
+
+        // Segment URI line
+        let segmentAbsoluteUrl = trimmed;
+        if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
+          segmentAbsoluteUrl = `${basePath}${trimmed}${searchParams}`;
+        } else if (!trimmed.includes('?') && searchParams) {
+          segmentAbsoluteUrl = `${trimmed}${searchParams}`;
+        }
+
+        return `/api/proxy/video?url=${encodeURIComponent(segmentAbsoluteUrl)}&source=${source}`;
+      });
+
+      responseHeaders.set('Content-Type', 'application/vnd.apple.mpegurl');
+      responseHeaders.set('Cache-Control', 'public, max-age=3600');
+      return new NextResponse(rewrittenLines.join('\n'), {
+        status: 200,
+        headers: responseHeaders,
+      });
+    }
+
+    // Binary stream (e.g. .ts segment or .mp4)
     responseHeaders.set('Content-Type', contentType);
 
     const contentLength = upstreamResponse.headers.get('content-length');
