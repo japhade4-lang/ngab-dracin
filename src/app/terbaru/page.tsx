@@ -2,15 +2,15 @@ import { fetchLatestDramas } from '@/lib/api';
 import LatestPageClient from './LatestPageClient';
 import type { Metadata } from 'next';
 
+export const dynamic = 'force-dynamic';
+
 export const metadata: Metadata = {
-  title: 'Film & Drama China Terbaru Hari Ini - Ngab Dracin',
-  description: 'Daftar episode dan film drama China terbaru yang baru dirilis hari ini dengan update otomatis live.',
+  title: 'Film & Drama Terbaru - Ngab Dracin',
+  description: 'Daftar drama China terbaru yang baru dirilis hari ini secara live.',
 };
 
-export const revalidate = 60; // Revalidate every 60 seconds
-
 export default async function TerbaruPage() {
-  const latestDramas = await fetchLatestDramas(100);
+  const latestDramas = await fetchLatestDramas(80);
 
   return <LatestPageClient initialDramas={latestDramas} />;
 }

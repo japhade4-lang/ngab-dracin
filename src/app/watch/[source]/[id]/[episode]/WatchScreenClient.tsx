@@ -131,22 +131,22 @@ export default function WatchScreenClient({
   );
 
   return (
-    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6">
-      <div className="flex flex-col lg:flex-row gap-6">
+    <div className="mx-auto max-w-7xl px-2.5 sm:px-6 lg:px-8 py-3 sm:py-6">
+      <div className="flex flex-col lg:flex-row gap-4 sm:gap-6">
         {/* Main Player Column */}
-        <div className="flex-1 space-y-4">
+        <div className="flex-1 space-y-3 sm:space-y-4">
           {/* Back Navigation & Breadcrumb */}
-          <div className="flex items-center justify-between text-xs sm:text-sm text-gray-400">
+          <div className="flex items-center justify-between text-xs sm:text-sm text-gray-400 px-0.5">
             <Link
               href={`/drama/${drama.source}/${drama.id}`}
-              className="flex items-center gap-1.5 hover:text-white transition-colors"
+              className="flex items-center gap-1 hover:text-white transition-colors"
             >
               <ChevronLeft className="h-4 w-4" />
-              <span>Kembali ke Detail Drama</span>
+              <span>Detail Drama</span>
             </Link>
 
-            <span className="text-gray-500">
-              Episode {currentEpisodeNumber} dari {totalEpisodes}
+            <span className="text-gray-400 text-xs">
+              Ep {currentEpisodeNumber} / {totalEpisodes}
             </span>
           </div>
 
@@ -270,7 +270,7 @@ export default function WatchScreenClient({
             </div>
 
             {/* Scrollable Episode List */}
-            <div className="max-h-[500px] overflow-y-auto no-scrollbar grid grid-cols-4 sm:grid-cols-5 lg:grid-cols-4 gap-2 pr-1">
+            <div className="max-h-[420px] sm:max-h-[500px] overflow-y-auto no-scrollbar grid grid-cols-5 sm:grid-cols-6 lg:grid-cols-4 gap-2 pr-1">
               {episodes.map((epNum) => {
                 const isCurrent = epNum === currentEpisodeNumber;
                 return (

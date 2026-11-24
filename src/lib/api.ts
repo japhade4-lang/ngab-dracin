@@ -9,7 +9,6 @@ const DRAMABUZZ_BASE = process.env.NEXT_PUBLIC_DRAMABUZZ_API_URL || 'https://api
 const DRAMABOX_BASE = process.env.DRAMABOX_API_URL || 'https://dramabox.goodbos.online';
 const SHORTMAX_BASE = process.env.SHORTMAX_API_URL || 'https://shortmax.goodbos.online';
 const NETSHORT_BASE = process.env.NETSHORT_API_URL || 'https://netshort.goodbos.online';
-const MELOLO_BASE = process.env.MELOLO_API_URL || 'https://melolo.goodbos.online';
 
 export interface DramabuzzPlatform {
   id: string;
@@ -30,18 +29,36 @@ export interface DramabuzzStatusResponse {
   platforms: DramabuzzPlatform[];
 }
 
-// In-memory cache for fast responsive navigation
+// Lightweight episode/detail lookup cache for playback navigation
 const episodeCache = new Map<string, any[]>();
 const dramaDetailCache = new Map<string, Drama>();
 
+function interleaveAndDedupe(lists: Drama[][]): Drama[] {
+  const result: Drama[] = [];
+  const seen = new Set<string>();
+  const maxLen = Math.max(0, ...lists.map((l) => l.length));
+
+  for (let i = 0; i < maxLen; i++) {
+    for (const list of lists) {
+      const item = list[i];
+      if (!item || !item.id) continue;
+      const key = `${item.source}_${item.id}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push(item);
+      }
+    }
+  }
+  return result;
+}
+
 /**
  * Fetch platform status from master Dramabuzz gateway
- * curl https://api.dramabuzz.sbs/api/status?key=B6860FC6979E745EF0C85B5E3496B5D2
  */
 export async function fetchDramabuzzStatus(): Promise<DramabuzzStatusResponse | null> {
   try {
     const res = await fetch(`${DRAMABUZZ_BASE}/api/status?key=${DRAMABUZZ_KEY}`, {
-      next: { revalidate: 3600 },
+      next: { revalidate: 300 },
       signal: AbortSignal.timeout(4000),
     });
     if (res.ok) {
@@ -54,204 +71,240 @@ export async function fetchDramabuzzStatus(): Promise<DramabuzzStatusResponse | 
 }
 
 /**
- * Fetch trending dramas across active platforms (DramaBox & ShortMax)
+ * Fetch LIVE Trending Sekarang across DramaBox Trending + ShortMax Ranking & Hot
  */
-export async function fetchTrending(source: DramaSource = 'dramabox'): Promise<Drama[]> {
-  const dramas: Drama[] = [];
-
-  // 1. Fetch from DramaBox Trending
-  try {
-    const res = await fetch(`${DRAMABOX_BASE}/api/dramabox/trending?lang=in`, {
+export async function fetchTrending(_source: DramaSource = 'dramabox'): Promise<Drama[]> {
+  const [dbRes, smRankRes, smHotRes] = await Promise.allSettled([
+    fetch(`${DRAMABOX_BASE}/api/dramabox/trending?lang=in`, {
       headers: { 'x-token': DRAMABUZZ_KEY },
-      next: { revalidate: 1800 },
-      signal: AbortSignal.timeout(4000),
-    });
-    if (res.ok) {
-      const data = await res.json();
+      next: { revalidate: 60 },
+      signal: AbortSignal.timeout(4500),
+    }),
+    fetch(`${SHORTMAX_BASE}/api/v1/ranking?lang=id&code=${DRAMABUZZ_KEY}`, {
+      next: { revalidate: 60 },
+      signal: AbortSignal.timeout(4500),
+    }),
+    fetch(`${SHORTMAX_BASE}/api/v1/hot?lang=id&code=${DRAMABUZZ_KEY}`, {
+      next: { revalidate: 60 },
+      signal: AbortSignal.timeout(4500),
+    }),
+  ]);
+
+  const dbList: Drama[] = [];
+  if (dbRes.status === 'fulfilled' && dbRes.value.ok) {
+    try {
+      const data = await dbRes.value.json();
       if (Array.isArray(data)) {
         for (const item of data) {
           const d = normalizeDramaboxItem(item);
-          dramas.push(d);
+          dbList.push(d);
           dramaDetailCache.set(`dramabox_${d.id}`, d);
         }
       }
-    }
-  } catch (err) {
-    console.warn('[API] DramaBox trending error:', err);
+    } catch {}
   }
 
-  // 2. Fetch from ShortMax Popular
-  try {
-    const res = await fetch(`${SHORTMAX_BASE}/api/v1/popular?lang=id&code=${DRAMABUZZ_KEY}`, {
-      next: { revalidate: 1800 },
-      signal: AbortSignal.timeout(4000),
-    });
-    if (res.ok) {
-      const json = await res.json();
-      const items = json?.data || [];
-      if (Array.isArray(items)) {
-        for (const item of items) {
-          const d = normalizeShortmaxItem(item);
-          dramas.push(d);
-          dramaDetailCache.set(`shortmax_${d.id}`, d);
+  const smList: Drama[] = [];
+  for (const res of [smRankRes, smHotRes]) {
+    if (res.status === 'fulfilled' && res.value.ok) {
+      try {
+        const json = await res.value.json();
+        const items = json?.data || [];
+        if (Array.isArray(items)) {
+          for (const item of items) {
+            const d = normalizeShortmaxItem(item);
+            smList.push(d);
+            dramaDetailCache.set(`shortmax_${d.id}`, d);
+          }
         }
-      }
+      } catch {}
     }
-  } catch (err) {
-    console.warn('[API] ShortMax popular error:', err);
   }
 
-  if (dramas.length > 0) {
-    return dramas;
-  }
-
-  return FALLBACK_DRAMAS;
+  const merged = interleaveAndDedupe([dbList, smList]);
+  return merged.length > 0 ? merged : FALLBACK_DRAMAS;
 }
 
 /**
- * Fetch latest & newly released dramas across platforms (DramaBox Latest & ShortMax New)
+ * Fetch LIVE Terbaru / Baru Rilis across DramaBox Latest + ShortMax New
  */
 export async function fetchLatestDramas(limit: number = 40): Promise<Drama[]> {
-  const dramas: Drama[] = [];
-
-  // 1. DramaBox Latest
-  try {
-    const res = await fetch(`${DRAMABOX_BASE}/api/dramabox/latest?lang=in`, {
+  const [dbRes, smRes] = await Promise.allSettled([
+    fetch(`${DRAMABOX_BASE}/api/dramabox/latest?lang=in`, {
       headers: { 'x-token': DRAMABUZZ_KEY },
       next: { revalidate: 60 },
-      signal: AbortSignal.timeout(4000),
-    });
-    if (res.ok) {
-      const data = await res.json();
+      signal: AbortSignal.timeout(4500),
+    }),
+    fetch(`${SHORTMAX_BASE}/api/v1/new?lang=id&code=${DRAMABUZZ_KEY}`, {
+      next: { revalidate: 60 },
+      signal: AbortSignal.timeout(4500),
+    }),
+  ]);
+
+  const dbList: Drama[] = [];
+  if (dbRes.status === 'fulfilled' && dbRes.value.ok) {
+    try {
+      const data = await dbRes.value.json();
       if (Array.isArray(data)) {
         for (const item of data) {
           const d = normalizeDramaboxItem(item);
-          d.tags = ['Baru Rilis', ...(d.tags || [])];
-          dramas.push(d);
+          dbList.push(d);
           dramaDetailCache.set(`dramabox_${d.id}`, d);
         }
       }
-    }
-  } catch (err) {
-    console.warn('[API] DramaBox latest error:', err);
+    } catch {}
   }
 
-  // 2. ShortMax New
-  try {
-    const res = await fetch(`${SHORTMAX_BASE}/api/v1/new?lang=id&code=${DRAMABUZZ_KEY}`, {
-      next: { revalidate: 60 },
-      signal: AbortSignal.timeout(4000),
-    });
-    if (res.ok) {
-      const json = await res.json();
+  const smList: Drama[] = [];
+  if (smRes.status === 'fulfilled' && smRes.value.ok) {
+    try {
+      const json = await smRes.value.json();
       const items = json?.data || [];
       if (Array.isArray(items)) {
         for (const item of items) {
           const d = normalizeShortmaxItem(item);
-          d.tags = ['Baru Rilis', ...(d.tags || [])];
-          dramas.push(d);
+          smList.push(d);
           dramaDetailCache.set(`shortmax_${d.id}`, d);
         }
       }
-    }
-  } catch (err) {
-    console.warn('[API] ShortMax new error:', err);
+    } catch {}
   }
 
-  if (dramas.length > 0) {
-    return dramas.slice(0, limit);
+  const merged = interleaveAndDedupe([dbList, smList]);
+  if (merged.length > 0) {
+    return merged.slice(0, limit);
   }
 
-  return (await fetchTrending()).map((d) => ({
-    ...d,
-    tags: ['Baru Rilis', ...(d.tags || [])],
-  }));
+  return (await fetchTrending()).slice(0, limit);
 }
 
 /**
- * Fetch For You / Explore catalog
+ * Fetch LIVE Rekomendasi For You (DramaBox ForYou + ShortMax VIP)
  */
-export async function fetchForYou(source: DramaSource = 'dramabox'): Promise<Drama[]> {
-  const dramas: Drama[] = [];
-
-  // Fetch DramaBox Browse catalog
-  try {
-    const res = await fetch(`${DRAMABOX_BASE}/api/dramabox/browse?page=1&lang=in`, {
+export async function fetchForYou(_source: DramaSource = 'dramabox'): Promise<Drama[]> {
+  const [dbForYouRes, smVipRes, dbBrowseRes] = await Promise.allSettled([
+    fetch(`${DRAMABOX_BASE}/api/dramabox/foryou?lang=in`, {
       headers: { 'x-token': DRAMABUZZ_KEY },
-      next: { revalidate: 1800 },
-      signal: AbortSignal.timeout(4000),
-    });
-    if (res.ok) {
-      const data = await res.json();
+      next: { revalidate: 60 },
+      signal: AbortSignal.timeout(4500),
+    }),
+    fetch(`${SHORTMAX_BASE}/api/v1/vip?lang=id&code=${DRAMABUZZ_KEY}`, {
+      next: { revalidate: 60 },
+      signal: AbortSignal.timeout(4500),
+    }),
+    fetch(`${DRAMABOX_BASE}/api/dramabox/browse?page=1&lang=in`, {
+      headers: { 'x-token': DRAMABUZZ_KEY },
+      next: { revalidate: 60 },
+      signal: AbortSignal.timeout(4500),
+    }),
+  ]);
+
+  const dbList: Drama[] = [];
+  if (dbForYouRes.status === 'fulfilled' && dbForYouRes.value.ok) {
+    try {
+      const data = await dbForYouRes.value.json();
+      const items = Array.isArray(data) ? data : data?.items || [];
+      for (const item of items) {
+        const d = normalizeDramaboxItem(item);
+        dbList.push(d);
+        dramaDetailCache.set(`dramabox_${d.id}`, d);
+      }
+    } catch {}
+  }
+
+  if (dbBrowseRes.status === 'fulfilled' && dbBrowseRes.value.ok) {
+    try {
+      const data = await dbBrowseRes.value.json();
       const items = data?.items || [];
       if (Array.isArray(items)) {
         for (const item of items) {
           const d = normalizeDramaboxItem(item);
-          dramas.push(d);
+          dbList.push(d);
           dramaDetailCache.set(`dramabox_${d.id}`, d);
         }
       }
-    }
-  } catch (err) {
-    console.warn('[API] DramaBox browse error:', err);
+    } catch {}
   }
 
-  if (dramas.length > 0) {
-    return dramas;
+  const smList: Drama[] = [];
+  if (smVipRes.status === 'fulfilled' && smVipRes.value.ok) {
+    try {
+      const json = await smVipRes.value.json();
+      const items = json?.data || [];
+      if (Array.isArray(items)) {
+        for (const item of items) {
+          const d = normalizeShortmaxItem(item);
+          smList.push(d);
+          dramaDetailCache.set(`shortmax_${d.id}`, d);
+        }
+      }
+    } catch {}
   }
 
-  return (await fetchTrending()).reverse();
+  const merged = interleaveAndDedupe([dbList, smList]);
+  if (merged.length > 0) {
+    return merged;
+  }
+
+  return await fetchTrending();
 }
 
 /**
- * Fetch Indonesian Dubbed Dramas (Sulih Suara / Dubbing ID)
+ * Fetch LIVE Indonesian Dubbed Dramas (DramaBox /dubbed + ShortMax Dubbing)
  */
 export async function fetchDubbedDramas(): Promise<Drama[]> {
-  const dramas: Drama[] = [];
-
-  // DramaBox Browse (has explicit 'Sulih Suara' and '配音剧')
-  try {
-    const res = await fetch(`${DRAMABOX_BASE}/api/dramabox/browse?page=1&lang=in`, {
+  const [dbDubRes, smHotRes, smPopRes] = await Promise.allSettled([
+    fetch(`${DRAMABOX_BASE}/api/dramabox/dubbed?classify=terpopuler&page=1&lang=in`, {
       headers: { 'x-token': DRAMABUZZ_KEY },
-      next: { revalidate: 1800 },
-      signal: AbortSignal.timeout(4000),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      const items = data?.items || [];
+      next: { revalidate: 60 },
+      signal: AbortSignal.timeout(4500),
+    }),
+    fetch(`${SHORTMAX_BASE}/api/v1/hot?lang=id&code=${DRAMABUZZ_KEY}`, {
+      next: { revalidate: 60 },
+      signal: AbortSignal.timeout(4500),
+    }),
+    fetch(`${SHORTMAX_BASE}/api/v1/popular?lang=id&code=${DRAMABUZZ_KEY}`, {
+      next: { revalidate: 60 },
+      signal: AbortSignal.timeout(4500),
+    }),
+  ]);
+
+  const dbList: Drama[] = [];
+  if (dbDubRes.status === 'fulfilled' && dbDubRes.value.ok) {
+    try {
+      const data = await dbDubRes.value.json();
+      const items = Array.isArray(data) ? data : data?.items || [];
       for (const item of items) {
         const d = normalizeDramaboxItem(item);
-        if (d.isDubbed) {
-          dramas.push(d);
-        }
+        d.isDubbed = true;
+        dbList.push(d);
+        dramaDetailCache.set(`dramabox_${d.id}`, d);
       }
-    }
-  } catch (err) {
-    console.warn('[API] DramaBox dubbed error:', err);
+    } catch {}
   }
 
-  // ShortMax popular (has '[Dubbing]' in title)
-  try {
-    const res = await fetch(`${SHORTMAX_BASE}/api/v1/popular?lang=id&code=${DRAMABUZZ_KEY}`, {
-      next: { revalidate: 1800 },
-      signal: AbortSignal.timeout(4000),
-    });
-    if (res.ok) {
-      const json = await res.json();
-      const items = json?.data || [];
-      for (const item of items) {
-        const d = normalizeShortmaxItem(item);
-        if (d.isDubbed) {
-          dramas.push(d);
+  const smList: Drama[] = [];
+  for (const res of [smHotRes, smPopRes]) {
+    if (res.status === 'fulfilled' && res.value.ok) {
+      try {
+        const json = await res.value.json();
+        const items = json?.data || [];
+        if (Array.isArray(items)) {
+          for (const item of items) {
+            const d = normalizeShortmaxItem(item);
+            if (d.isDubbed) {
+              smList.push(d);
+              dramaDetailCache.set(`shortmax_${d.id}`, d);
+            }
+          }
         }
-      }
+      } catch {}
     }
-  } catch (err) {
-    console.warn('[API] ShortMax dubbed error:', err);
   }
 
-  if (dramas.length > 0) {
-    return dramas;
+  const merged = interleaveAndDedupe([dbList, smList]);
+  if (merged.length > 0) {
+    return merged;
   }
 
   return FALLBACK_DRAMAS.filter((d) => d.isDubbed);
@@ -273,7 +326,7 @@ export async function fetchDramaDetail(source: DramaSource, id: string): Promise
         `${DRAMABOX_BASE}/api/dramabox/detail?bookId=${encodeURIComponent(id)}`,
         {
           headers: { 'x-token': DRAMABUZZ_KEY },
-          next: { revalidate: 3600 },
+          next: { revalidate: 300 },
           signal: AbortSignal.timeout(4000),
         }
       );
@@ -294,7 +347,7 @@ export async function fetchDramaDetail(source: DramaSource, id: string): Promise
   if (source === 'shortmax') {
     try {
       const res = await fetch(`${SHORTMAX_BASE}/api/v1/alleps/${encodeURIComponent(id)}?lang=id&code=${DRAMABUZZ_KEY}`, {
-        next: { revalidate: 3600 },
+        next: { revalidate: 300 },
         signal: AbortSignal.timeout(4000),
       });
       if (res.ok) {
@@ -304,16 +357,21 @@ export async function fetchDramaDetail(source: DramaSource, id: string): Promise
           if (data.episodes) {
             episodeCache.set(`shortmax_${id}`, data.episodes);
           }
+          const isDub = Boolean(
+            data.name?.toLowerCase().includes('dubbing') ||
+              data.name?.toLowerCase().includes('dijuluki') ||
+              data.name?.toLowerCase().includes('sulih')
+          );
           const drama: Drama = {
             id,
             bookId: String(data.code || id),
             title: data.name || cached?.title || `ShortMax Series #${id}`,
             cover: data.cover || cached?.cover || '',
             intro: data.summary || cached?.intro || '',
-            tags: ['ShortMax', 'Romantis', data.name?.includes('Dubbing') ? 'Sulih Suara ID' : 'Sub Indo'],
+            tags: ['ShortMax', isDub ? 'Dubbing ID' : 'Sub Indo'],
             source: 'shortmax',
             totalEpisodes: data.totalEpisodes || data.episodes?.length || 50,
-            isDubbed: data.name?.includes('Dubbing') ?? true,
+            isDubbed: isDub,
           };
           dramaDetailCache.set(`shortmax_${id}`, drama);
           return drama;
@@ -329,7 +387,7 @@ export async function fetchDramaDetail(source: DramaSource, id: string): Promise
     try {
       const res = await fetch(`${NETSHORT_BASE}/api/drama/${encodeURIComponent(id)}?lang=in`, {
         headers: { 'x-token': DRAMABUZZ_KEY },
-        next: { revalidate: 3600 },
+        next: { revalidate: 300 },
         signal: AbortSignal.timeout(4000),
       });
       if (res.ok) {
@@ -342,7 +400,7 @@ export async function fetchDramaDetail(source: DramaSource, id: string): Promise
             title: data.shortPlayName || cached?.title || `NetShort #${id}`,
             cover: data.shortPlayCover || cached?.cover || '',
             intro: cached?.intro || 'Kisah cinta dan drama penuh konflik di setiap episodenya.',
-            tags: ['NetShort', 'Drama', 'Populer'],
+            tags: ['NetShort', 'Drama'],
             source: 'netshort',
             totalEpisodes: data.totalEpisode || 50,
             isDubbed: true,
@@ -390,7 +448,7 @@ export async function fetchDramaStream(
       if (!episodes) {
         const res = await fetch(`${DRAMABOX_BASE}/api/dramabox/allepisode?bookId=${encodeURIComponent(dramaId)}`, {
           headers: { 'x-token': DRAMABUZZ_KEY },
-          signal: AbortSignal.timeout(4000),
+          signal: AbortSignal.timeout(4500),
         });
         if (res.ok) {
           episodes = await res.json();
@@ -401,9 +459,8 @@ export async function fetchDramaStream(
       }
 
       if (Array.isArray(episodes) && episodes.length > 0) {
-        // Episode index is 0-based
         const targetEp = episodes[episode - 1] || episodes[0];
-        const streamUrl = targetEp.videoUrl720 || targetEp.videoUrl || targetEp.videoUrl1080;
+        const streamUrl = targetEp.videoUrl720 || targetEp.videoUrl || targetEp.videoUrl540 || targetEp.videoUrl1080;
         if (streamUrl) {
           return {
             episodeNumber: episode,
@@ -414,9 +471,7 @@ export async function fetchDramaStream(
               targetEp.videoUrl720 ? { quality: '720p', videoUrl: targetEp.videoUrl720 } : null,
               targetEp.videoUrl540 ? { quality: '540p', videoUrl: targetEp.videoUrl540 } : null,
             ].filter(Boolean) as any[],
-            subtitles: [
-              { language: 'id', label: 'Bahasa Indonesia (Dubbing)', url: '' }
-            ]
+            subtitles: [{ language: 'id', label: 'Bahasa Indonesia (Dubbing)', url: '' }],
           };
         }
       }
@@ -425,14 +480,14 @@ export async function fetchDramaStream(
     }
   }
 
-  // 2. ShortMax Stream: Direct HLS (.m3u8) via Akamai CDN
+  // 2. ShortMax Stream: HLS (.m3u8) via Akamai CDN
   if (source === 'shortmax') {
     try {
       let episodes = episodeCache.get(`shortmax_${dramaId}`);
       if (!episodes) {
         const res = await fetch(
           `${SHORTMAX_BASE}/api/v1/alleps/${encodeURIComponent(dramaId)}?lang=id&code=${DRAMABUZZ_KEY}`,
-          { signal: AbortSignal.timeout(4000) }
+          { signal: AbortSignal.timeout(4500) }
         );
         if (res.ok) {
           const json = await res.json();
@@ -447,8 +502,8 @@ export async function fetchDramaStream(
         const targetEp = episodes.find((e: any) => e.episode === episode) || episodes[0];
         const streamUrl =
           targetEp?.video?.video_720 ||
-          targetEp?.video?.video_1080 ||
-          targetEp?.video?.video_480;
+          targetEp?.video?.video_480 ||
+          targetEp?.video?.video_1080;
 
         if (streamUrl) {
           return {
@@ -460,9 +515,7 @@ export async function fetchDramaStream(
               targetEp.video.video_720 ? { quality: '720p', videoUrl: targetEp.video.video_720 } : null,
               targetEp.video.video_480 ? { quality: '480p', videoUrl: targetEp.video.video_480 } : null,
             ].filter(Boolean) as any[],
-            subtitles: [
-              { language: 'id', label: 'Bahasa Indonesia', url: '' }
-            ]
+            subtitles: [{ language: 'id', label: 'Bahasa Indonesia', url: '' }],
           };
         }
       }
@@ -471,7 +524,7 @@ export async function fetchDramaStream(
     }
   }
 
-  // 3. Fallback verified video
+  // 3. Fallback video
   const backupStreams = [
     'https://hwztakavideoto.dramaboxdb.com/4e02c3aa069bda473ef7f84a6353c030/6af73f41/19/6x3/63x4/634x2/63422000024/701367491_2/701367491.720p.narrowv3.mp4',
     'https://hwztakavideoto.dramaboxdb.com/2be57b13c5f795547796d545784021c8/6af73f41/69/8x7/87x2/872x2/87223000024/701844796_1/701844796.720p.wz.h264.mp4',
@@ -484,9 +537,9 @@ export async function fetchDramaStream(
     videoUrl: streamUrl,
     qualities: [
       { quality: '720p', videoUrl: streamUrl },
-      { quality: '480p', videoUrl: streamUrl }
+      { quality: '480p', videoUrl: streamUrl },
     ],
-    subtitles: [{ language: 'id', label: 'Bahasa Indonesia', url: '' }]
+    subtitles: [{ language: 'id', label: 'Bahasa Indonesia', url: '' }],
   };
 }
 
@@ -496,58 +549,52 @@ export async function fetchDramaStream(
 export async function searchDramas(query: string): Promise<Drama[]> {
   if (!query || !query.trim()) return [];
   const q = query.trim();
-  const results: Drama[] = [];
 
-  // ShortMax search
-  try {
-    const res = await fetch(`${SHORTMAX_BASE}/api/v1/search?q=${encodeURIComponent(q)}&lang=id&code=${DRAMABUZZ_KEY}`, {
-      signal: AbortSignal.timeout(3000),
-    });
-    if (res.ok) {
-      const json = await res.json();
+  const [smRes, dbRes] = await Promise.allSettled([
+    fetch(`${SHORTMAX_BASE}/api/v1/search?q=${encodeURIComponent(q)}&lang=id&code=${DRAMABUZZ_KEY}`, {
+      signal: AbortSignal.timeout(3500),
+    }),
+    fetch(`${DRAMABOX_BASE}/api/dramabox/search?query=${encodeURIComponent(q)}&lang=in`, {
+      headers: { 'x-token': DRAMABUZZ_KEY },
+      signal: AbortSignal.timeout(3500),
+    }),
+  ]);
+
+  const smList: Drama[] = [];
+  if (smRes.status === 'fulfilled' && smRes.value.ok) {
+    try {
+      const json = await smRes.value.json();
       const items = json?.data || [];
       if (Array.isArray(items)) {
-        for (const item of items) {
-          results.push(normalizeShortmaxItem(item));
-        }
+        for (const item of items) smList.push(normalizeShortmaxItem(item));
       }
-    }
-  } catch (err) {
-    console.warn('[API] Shortmax search error:', err);
+    } catch {}
   }
 
-  // DramaBox search
-  try {
-    const res = await fetch(`${DRAMABOX_BASE}/api/dramabox/search?query=${encodeURIComponent(q)}&lang=in`, {
-      headers: { 'x-token': DRAMABUZZ_KEY },
-      signal: AbortSignal.timeout(3000),
-    });
-    if (res.ok) {
-      const data = await res.json();
+  const dbList: Drama[] = [];
+  if (dbRes.status === 'fulfilled' && dbRes.value.ok) {
+    try {
+      const data = await dbRes.value.json();
       if (Array.isArray(data)) {
-        for (const item of data) {
-          results.push(normalizeDramaboxItem(item));
-        }
+        for (const item of data) dbList.push(normalizeDramaboxItem(item));
       }
-    }
-  } catch (err) {
-    console.warn('[API] DramaBox search error:', err);
+    } catch {}
   }
 
-  return results;
+  return interleaveAndDedupe([dbList, smList]);
 }
 
 function normalizeDramaboxItem(item: any): Drama {
   const id = String(item.bookId || item.id || '');
-  const title = item.bookName || item.title || 'DramaBox Series';
+  const title = (item.bookName || item.title || 'DramaBox Series').trim();
   const cover =
     item.coverWap ||
     item.cover ||
     'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=600&auto=format&fit=crop&q=80';
 
   const isDub =
-    title.includes('Sulih Suara') ||
-    title.includes('Dubbing') ||
+    title.toLowerCase().includes('sulih suara') ||
+    title.toLowerCase().includes('dubbing') ||
     (Array.isArray(item.markNames) && item.markNames.includes('配音剧')) ||
     (Array.isArray(item.tags) && item.tags.some((t: string) => t.toLowerCase().includes('sulih') || t.toLowerCase().includes('dub')));
 
@@ -560,7 +607,7 @@ function normalizeDramaboxItem(item: any): Drama {
     coverWap: cover,
     intro: item.introduction || item.intro || 'Drama pendek pilihan populer DramaBox.',
     hotCode: item.playCount || '1.2M',
-    tags: item.tags || ['DramaBox', 'Populer', isDub ? 'Sulih Suara ID' : 'Sub Indo'],
+    tags: item.tags || ['DramaBox', isDub ? 'Dub Indo' : 'Sub Indo'],
     source: 'dramabox',
     totalEpisodes: Number(item.chapterCount || 50),
     isDubbed: isDub,
@@ -569,12 +616,16 @@ function normalizeDramaboxItem(item: any): Drama {
 
 function normalizeShortmaxItem(item: any): Drama {
   const id = String(item.code || item.id || '');
-  const title = item.name || item.title || 'ShortMax Series';
+  const title = (item.name || item.title || 'ShortMax Series').trim();
   const cover =
     item.cover ||
     'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=600&auto=format&fit=crop&q=80';
 
-  const isDub = title.startsWith('[Dubbing]') || title.toLowerCase().includes('dubbing');
+  const lowerTitle = title.toLowerCase();
+  const isDub =
+    lowerTitle.includes('dubbing') ||
+    lowerTitle.includes('dijuluki') ||
+    lowerTitle.includes('sulih');
 
   return {
     id,
@@ -585,7 +636,7 @@ function normalizeShortmaxItem(item: any): Drama {
     coverWap: cover,
     intro: item.summary || item.intro || 'Drama pendek pilihan populer ShortMax.',
     hotCode: item.views ? `${(item.views / 1000000).toFixed(1)}M` : '2.5M',
-    tags: ['ShortMax', isDub ? 'Sulih Suara ID' : 'Sub Indo'],
+    tags: ['ShortMax', isDub ? 'Dub Indo' : 'Sub Indo'],
     source: 'shortmax',
     totalEpisodes: Number(item.episodes || 50),
     isDubbed: isDub,
@@ -601,7 +652,7 @@ export const FALLBACK_DRAMAS: Drama[] = [
     cover: 'https://hwztchapter.dramaboxdb.com/data/cppartner/4x2/42x0/420x0/42000022436/42000022436.jpg?t=1785209042338',
     horizontalCover: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=1200&auto=format&fit=crop&q=80',
     hotCode: '4.8M',
-    tags: ['Raja Naga', 'Romantis', 'Sulih Suara ID'],
+    tags: ['Raja Naga', 'Romantis'],
     source: 'dramabox',
     totalEpisodes: 50,
     isDubbed: true,
@@ -615,7 +666,7 @@ export const FALLBACK_DRAMAS: Drama[] = [
     cover: 'https://hwztchapter.dramaboxdb.com/data/cppartner/4x2/42x0/420x0/42000032278/42000032278.jpg?t=1793093823568',
     horizontalCover: 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=1200&auto=format&fit=crop&q=80',
     hotCode: '4.1M',
-    tags: ['Serangan Balik', 'Bertahan Hidup', 'Sulih Suara ID'],
+    tags: ['Serangan Balik', 'Bertahan Hidup'],
     source: 'dramabox',
     totalEpisodes: 50,
     isDubbed: true,
@@ -629,7 +680,7 @@ export const FALLBACK_DRAMAS: Drama[] = [
     cover: 'https://akamai-static.shorttv.live/images/cover/2025/11/07/853fb4b7ac4d453cb89eaaf2fe35d51d.jpg?auth_key=1782904166-0-0-cc25cb387faa7996322e1dd44d3393eb&process=mediagate',
     horizontalCover: 'https://images.unsplash.com/photo-1534447677768-be436bb09401?w=1200&auto=format&fit=crop&q=80',
     hotCode: '4.4M',
-    tags: ['Reinkarnasi', 'Pembalasan', 'Sulih Suara ID'],
+    tags: ['Reinkarnasi', 'Pembalasan'],
     source: 'shortmax',
     totalEpisodes: 57,
     isDubbed: true,
