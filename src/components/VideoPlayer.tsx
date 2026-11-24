@@ -500,17 +500,7 @@ export default function VideoPlayer({
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Quick Player Download Button */}
-            <button
-              onClick={handlePlayerDownload}
-              className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/10 hover:bg-white/20 border border-white/10 text-xs font-semibold text-gray-200 transition-colors"
-              title="Unduh video yang sedang diputar (MP4)"
-            >
-              <Download className="h-3.5 w-3.5 text-rose-400" />
-              <span className="hidden sm:inline">Unduh MP4</span>
-            </button>
-
-
+            {/* Native clean player header */}
           </div>
         </div>
       </div>

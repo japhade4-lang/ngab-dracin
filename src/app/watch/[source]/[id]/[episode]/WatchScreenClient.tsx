@@ -147,12 +147,6 @@ export default function WatchScreenClient({
             onActiveUrlChange={setCurrentVideoUrl}
           />
 
-          {/* Online Streaming Notice */}
-          <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-300">
-            <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse flex-shrink-0" />
-            <span><strong>Streaming Langsung di Web:</strong> Klik tombol Play di layar video untuk memutar langsung secara online tanpa perlu mendownload apa pun.</span>
-          </div>
-
           {/* Navigation Controls: Prev / Next / Download / Favorite buttons */}
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white/5 border border-white/5 p-3 sm:p-4">
             <div className="flex items-center gap-2">
