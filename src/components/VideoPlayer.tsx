@@ -53,6 +53,7 @@ export default function VideoPlayer({
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [bufferedTime, setBufferedTime] = useState(0);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
@@ -87,23 +88,29 @@ export default function VideoPlayer({
 
   const resolveStreamUrl = (target: string) => {
     if (!target) return backupMirrors[0];
-    // Direct MP4 streams (e.g. DramaBox Akamai CDN hwztakavideoto.dramaboxdb.com)
-    // MUST play directly from the edge CDN for instant buffering, hardware decoding, and zero stutter
+
+    // Already a proxy or relative URL
+    if (target.startsWith('/') || target.includes('/api/proxy/video')) {
+      return target;
+    }
+
+    // Direct local/demo mirrors
     if (
-      target.includes('dramabox') ||
-      target.includes('dramaboxdb.com') ||
-      target.includes('.mp4') ||
       target.includes('vjs.zencdn.net') ||
       target.includes('w3schools.com') ||
-      target.includes('w3.org') ||
-      target.includes('cdn.dracinapi.com') ||
-      target.includes('mux.dev')
+      target.includes('w3.org')
     ) {
       return target;
     }
 
-    // Only proxy HLS streams that enforce strict cross-origin restrictions
-    if (target.includes('.m3u8') && target.includes('shorttv.live')) {
+    // Proxy all remote streaming CDN URLs (DramaBox MP4 & ShortMax HLS)
+    // to utilize VPS high-speed backbone (80 MB/s) with Range support & caching
+    if (
+      target.includes('dramaboxdb.com') ||
+      target.includes('shorttv.live') ||
+      target.includes('.m3u8') ||
+      target.includes('.mp4')
+    ) {
       return `/api/proxy/video?url=${encodeURIComponent(target)}&source=${source}`;
     }
 
@@ -150,11 +157,15 @@ export default function VideoPlayer({
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
-          backBufferLength: 30,
-          maxBufferLength: 15,
-          maxMaxBufferLength: 30,
-          maxBufferSize: 30 * 1000 * 1000,
-          fragLoadingTimeOut: 20000,
+          backBufferLength: 90,
+          maxBufferLength: 90,
+          maxMaxBufferLength: 180,
+          maxBufferSize: 60 * 1000 * 1000,
+          maxBufferHole: 0.5,
+          highBufferWatchdogPeriod: 1,
+          nudgeOffset: 0.1,
+          nudgeMaxRetry: 5,
+          fragLoadingTimeOut: 30000,
           manifestLoadingTimeOut: 20000,
         });
         hls.loadSource(stream);
@@ -203,8 +214,17 @@ export default function VideoPlayer({
 
     const handleTimeUpdate = () => {
       setCurrentTime(video.currentTime);
+      if (video.buffered.length > 0) {
+        setBufferedTime(video.buffered.end(video.buffered.length - 1));
+      }
       if (onTimeUpdate && video.duration) {
         onTimeUpdate(video.currentTime, video.duration);
+      }
+    };
+
+    const handleProgress = () => {
+      if (video.buffered.length > 0) {
+        setBufferedTime(video.buffered.end(video.buffered.length - 1));
       }
     };
 
@@ -227,6 +247,7 @@ export default function VideoPlayer({
 
     video.addEventListener('loadedmetadata', handleLoadedMetadata);
     video.addEventListener('timeupdate', handleTimeUpdate);
+    video.addEventListener('progress', handleProgress);
     video.addEventListener('waiting', handleWaiting);
     video.addEventListener('canplay', handleCanPlay);
     video.addEventListener('playing', handlePlaying);
@@ -237,6 +258,7 @@ export default function VideoPlayer({
     return () => {
       video.removeEventListener('loadedmetadata', handleLoadedMetadata);
       video.removeEventListener('timeupdate', handleTimeUpdate);
+      video.removeEventListener('progress', handleProgress);
       video.removeEventListener('waiting', handleWaiting);
       video.removeEventListener('canplay', handleCanPlay);
       video.removeEventListener('playing', handlePlaying);
@@ -457,15 +479,24 @@ export default function VideoPlayer({
           showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       >
-        {/* Progress Bar Slider */}
+        {/* Progress Bar with Buffered Visual Indicator */}
         <div className="relative mb-3 flex items-center">
+          {/* Buffered track overlay */}
+          <div className="absolute inset-x-0 h-1.5 bg-white/20 rounded-lg overflow-hidden pointer-events-none">
+            <div
+              className="h-full bg-white/30 transition-all duration-300"
+              style={{
+                width: `${duration > 0 ? Math.min(100, (bufferedTime / duration) * 100) : 0}%`,
+              }}
+            />
+          </div>
           <input
             type="range"
             min={0}
             max={duration || 100}
             value={currentTime}
             onChange={handleSeek}
-            className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-rose-500 hover:h-2.5 transition-all"
+            className="w-full h-1.5 bg-transparent rounded-lg appearance-none cursor-pointer accent-rose-500 hover:h-2.5 transition-all relative z-10"
           />
         </div>
 
