@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Drama, Episode } from '@/types/drama';
@@ -14,10 +14,6 @@ import {
   ListVideo,
   Volume2,
   Download,
-  KeyRound,
-  ExternalLink,
-  ShieldCheck,
-  Sparkles,
   Loader2,
 } from 'lucide-react';
 
@@ -33,19 +29,30 @@ export default function WatchScreenClient({
   streamData,
 }: Props) {
   const router = useRouter();
-  const { updateHistory, addFavorite, removeFavorite, isFavorite, getHistoryItem } = useAppStore();
+  const updateHistory = useAppStore((s) => s.updateHistory);
+  const addFavorite = useAppStore((s) => s.addFavorite);
+  const removeFavorite = useAppStore((s) => s.removeFavorite);
+  const bookmarked = useAppStore((s) => s.favorites.some((f) => f.dramaId === drama.id));
 
   const totalEpisodes = drama.totalEpisodes || 60;
   const hasNext = currentEpisodeNumber < totalEpisodes;
   const hasPrev = currentEpisodeNumber > 1;
 
-  const bookmarked = isFavorite(drama.id);
-  const historyItem = getHistoryItem(drama.id);
+  // Read initial resume time ONCE per drama/episode so live timeupdate never triggers re-renders
+  const initialResumeTime = useMemo(() => {
+    const item = useAppStore.getState().getHistoryItem(drama.id);
+    if (item && item.episodeNumber === currentEpisodeNumber && item.currentTime > 2) {
+      if (!item.duration || item.currentTime < item.duration - 2) {
+        return item.currentTime;
+      }
+    }
+    return 0;
+  }, [drama.id, currentEpisodeNumber]);
+
+  const lastSavedAtRef = useRef<number>(0);
 
   const [currentVideoUrl, setCurrentVideoUrl] = useState(streamData.videoUrl || '');
-  const [isLicensed, setIsLicensed] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
-  const [licenseKey, setLicenseKey] = useState('');
 
   // Synchronize active video URL directly from genuine streamData
   useEffect(() => {
@@ -85,33 +92,43 @@ export default function WatchScreenClient({
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-    } catch (err) {
+    } catch {
       window.open(currentVideoUrl, '_blank');
     } finally {
       setTimeout(() => setIsDownloading(false), 2000);
     }
   };
 
-  const handleTimeUpdate = (currentTime: number, duration: number) => {
-    updateHistory({
-      dramaId: drama.id,
-      source: drama.source,
-      title: drama.title,
-      cover: drama.cover,
-      episodeNumber: currentEpisodeNumber,
-      currentTime,
-      duration,
-      updatedAt: Date.now(),
-    });
-  };
+  // Throttled history persistence (every 3s max) to keep playback 100% smooth
+  const handleTimeUpdate = useCallback(
+    (currentTime: number, duration: number) => {
+      const now = Date.now();
+      if (now - lastSavedAtRef.current < 3000) return;
+      lastSavedAtRef.current = now;
+      updateHistory({
+        dramaId: drama.id,
+        source: drama.source,
+        title: drama.title,
+        cover: drama.cover,
+        episodeNumber: currentEpisodeNumber,
+        currentTime,
+        duration,
+        updatedAt: now,
+      });
+    },
+    [drama.id, drama.source, drama.title, drama.cover, currentEpisodeNumber, updateHistory]
+  );
 
-  const handleEnded = () => {
+  const handleEnded = useCallback(() => {
     if (hasNext) {
       router.push(`/watch/${drama.source}/${drama.id}/${currentEpisodeNumber + 1}`);
     }
-  };
+  }, [hasNext, router, drama.source, drama.id, currentEpisodeNumber]);
 
-  const episodes = Array.from({ length: totalEpisodes }, (_, i) => i + 1);
+  const episodes = useMemo(
+    () => Array.from({ length: totalEpisodes }, (_, i) => i + 1),
+    [totalEpisodes]
+  );
 
   return (
     <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6">
@@ -135,11 +152,12 @@ export default function WatchScreenClient({
 
           {/* Video Player */}
           <VideoPlayer
+            key={`${drama.source}-${drama.id}-${currentEpisodeNumber}`}
             url={currentVideoUrl}
             source={drama.source}
             title={drama.title}
             episodeNumber={currentEpisodeNumber}
-            initialTime={historyItem?.episodeNumber === currentEpisodeNumber ? historyItem.currentTime : 0}
+            initialTime={initialResumeTime}
             qualities={streamData.qualities}
             subtitles={streamData.subtitles}
             onTimeUpdate={handleTimeUpdate}

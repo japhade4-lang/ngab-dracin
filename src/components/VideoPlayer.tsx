@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Play,
   Pause,
@@ -13,10 +13,8 @@ import {
   AlertCircle,
   RefreshCw,
   Loader2,
-  Link as LinkIcon,
-  Download,
-  KeyRound,
   Check,
+  Server,
 } from 'lucide-react';
 import { SubtitleTrack, VideoQuality } from '@/types/drama';
 import Hls from 'hls.js';
@@ -41,7 +39,6 @@ export default function VideoPlayer({
   episodeNumber = 1,
   initialTime = 0,
   qualities = [],
-  subtitles = [],
   onTimeUpdate,
   onEnded,
   onActiveUrlChange,
@@ -54,208 +51,189 @@ export default function VideoPlayer({
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [bufferedTime, setBufferedTime] = useState(0);
-  const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [showControls, setShowControls] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
-  const [showApiModal, setShowApiModal] = useState(false);
-  const [customStreamInput, setCustomStreamInput] = useState('');
-  const [apiKeyInput, setApiKeyInput] = useState('');
-  const [apiKeySaved, setApiKeySaved] = useState(false);
 
   const [isLoading, setIsLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [activeUrl, setActiveUrl] = useState(url);
+  // Direct CDN first for MP4s (0ms overhead, Akamai supports CORS + HTTP 206);
+  // auto-switches to VPS Proxy on error or manually via settings.
+  // HLS (.m3u8) uses CORS proxy automatically on Hls.js browsers.
+  const [useProxyFallback, setUseProxyFallback] = useState(false);
 
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Backup mirrors
-  const backupMirrors = [
-    'https://vjs.zencdn.net/v/oceans.mp4',
-    'https://media.w3.org/2010/05/sintel/trailer.mp4',
-    'https://www.w3schools.com/html/mov_bbb.mp4',
-  ];
-
-  // Load custom API key or saved custom stream if exists
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const savedKey = localStorage.getItem('dracin_api_key');
-      if (savedKey) setApiKeyInput(savedKey);
-    }
-  }, []);
-
-  const resolveStreamUrl = (target: string) => {
-    if (!target) return backupMirrors[0];
-
-    // Already a proxy or relative URL
-    if (target.startsWith('/') || target.includes('/api/proxy/video')) {
-      return target;
-    }
-
-    // Direct local/demo mirrors
-    if (
-      target.includes('vjs.zencdn.net') ||
-      target.includes('w3schools.com') ||
-      target.includes('w3.org')
-    ) {
-      return target;
-    }
-
-    // Proxy all remote streaming CDN URLs (DramaBox MP4 & ShortMax HLS)
-    // to utilize VPS high-speed backbone (80 MB/s) with Range support & caching
-    if (
-      target.includes('dramaboxdb.com') ||
-      target.includes('shorttv.live') ||
-      target.includes('.m3u8') ||
-      target.includes('.mp4')
-    ) {
-      return `/api/proxy/video?url=${encodeURIComponent(target)}&source=${source}`;
-    }
-
-    return target;
-  };
+  // Keep latest callbacks/resume time in refs so React never reloads <video> during playback
+  const onTimeUpdateRef = useRef(onTimeUpdate);
+  const onEndedRef = useRef(onEnded);
+  const onActiveUrlChangeRef = useRef(onActiveUrlChange);
+  const pendingResumeTimeRef = useRef<number>(initialTime);
 
   useEffect(() => {
+    onTimeUpdateRef.current = onTimeUpdate;
+  }, [onTimeUpdate]);
+
+  useEffect(() => {
+    onEndedRef.current = onEnded;
+  }, [onEnded]);
+
+  useEffect(() => {
+    onActiveUrlChangeRef.current = onActiveUrlChange;
+  }, [onActiveUrlChange]);
+
+  // Sync incoming episode url cleanly
+  useEffect(() => {
+    pendingResumeTimeRef.current = initialTime;
     setActiveUrl(url);
+    setUseProxyFallback(false);
     setHasError(false);
     setIsLoading(true);
-    if (onActiveUrlChange) {
-      onActiveUrlChange(url);
+    setCurrentTime(0);
+    setBufferedTime(0);
+    setDuration(0);
+    if (onActiveUrlChangeRef.current) {
+      onActiveUrlChangeRef.current(url);
     }
-  }, [url, onActiveUrlChange]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url]);
 
-  const handlePlayerDownload = () => {
-    const downloadEndpoint = `/api/download?url=${encodeURIComponent(
-      activeUrl
-    )}&title=${encodeURIComponent(title || 'Drama')}&episode=${episodeNumber}`;
-    const a = document.createElement('a');
-    a.href = downloadEndpoint;
-    a.download = `${(title || 'Drama').replace(/\s+/g, '_')}_EP${episodeNumber}.mp4`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  };
+  const resolveStreamUrl = useCallback(
+    (target: string, forceProxy: boolean) => {
+      if (!target) return '';
+      if (target.startsWith('/') || target.includes('/api/proxy/video')) {
+        return target;
+      }
 
+      const isHls = target.includes('.m3u8');
+      // ShortMax / remote .m3u8 needs CORS proxy in Hls.js browsers unless native Safari HLS
+      if (isHls) {
+        const videoEl = videoRef.current;
+        const canNativeHls =
+          !Hls.isSupported() && Boolean(videoEl?.canPlayType('application/vnd.apple.mpegurl'));
+        if (canNativeHls && !forceProxy) {
+          return target;
+        }
+        return `/api/proxy/video?url=${encodeURIComponent(target)}&source=${encodeURIComponent(source)}`;
+      }
+
+      // MP4 streams (DramaBox Akamai CDN): play DIRECT by default (fastest, zero VPS wait),
+      // only route through VPS proxy if forced or direct playback failed.
+      if (forceProxy) {
+        return `/api/proxy/video?url=${encodeURIComponent(target)}&source=${encodeURIComponent(source)}`;
+      }
+
+      return target;
+    },
+    [source]
+  );
+
+  // Main video initialization effect — ONLY runs when activeUrl or proxy mode changes!
   useEffect(() => {
     const video = videoRef.current;
-    if (!video) return;
+    if (!video || !activeUrl) return;
 
-    const stream = resolveStreamUrl(activeUrl);
+    const stream = resolveStreamUrl(activeUrl, useProxyFallback);
+    if (!stream) return;
+
     setHasError(false);
     setIsLoading(true);
-    const safetyTimer = setTimeout(() => setIsLoading(false), 2000);
 
     if (hlsRef.current) {
       hlsRef.current.destroy();
       hlsRef.current = null;
     }
 
-    if (stream.includes('.m3u8')) {
-      if (Hls.isSupported()) {
-        const hls = new Hls({
-          enableWorker: true,
-          lowLatencyMode: false,
-          backBufferLength: 90,
-          maxBufferLength: 90,
-          maxMaxBufferLength: 180,
-          maxBufferSize: 60 * 1000 * 1000,
-          maxBufferHole: 0.5,
-          highBufferWatchdogPeriod: 1,
-          nudgeOffset: 0.1,
-          nudgeMaxRetry: 5,
-          fragLoadingTimeOut: 30000,
-          manifestLoadingTimeOut: 20000,
-        });
-        hls.loadSource(stream);
-        hls.attachMedia(video);
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          setIsLoading(false);
-          if (initialTime > 0) video.currentTime = initialTime;
-          video.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
-        });
-        hls.on(Hls.Events.ERROR, (_, data) => {
-          if (data.fatal) {
-            handleVideoError();
-          }
-        });
-        hlsRef.current = hls;
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = stream;
-      }
-    } else {
-      video.src = stream;
-      video.load();
-      const playPromise = video.play();
-      if (playPromise !== undefined) {
-        playPromise
-          .then(() => {
-            setIsPlaying(true);
-            setIsLoading(false);
-          })
-          .catch(() => {
-            setIsPlaying(false);
-            setIsLoading(false);
-          });
-      } else {
-        setIsLoading(false);
-      }
-    }
+    let waitingTimeout: NodeJS.Timeout | null = null;
+    const safetyTimer = setTimeout(() => setIsLoading(false), 3000);
+    let disposed = false;
 
-    const handleLoadedMetadata = () => {
-      setDuration(video.duration || 0);
-      setIsLoading(false);
-      setHasError(false);
-      if (initialTime > 0) {
-        video.currentTime = initialTime;
+    const applyPendingResume = () => {
+      const resumeAt = pendingResumeTimeRef.current;
+      if (resumeAt > 0 && Number.isFinite(resumeAt)) {
+        if (!video.duration || resumeAt < video.duration - 1) {
+          video.currentTime = resumeAt;
+        }
+        pendingResumeTimeRef.current = 0;
       }
     };
 
+    const triggerFallbackOrError = () => {
+      if (disposed) return;
+      setIsLoading(false);
+      // Try VPS proxy automatically once if direct CDN failed
+      if (!useProxyFallback && !activeUrl.startsWith('/')) {
+        pendingResumeTimeRef.current = video.currentTime || pendingResumeTimeRef.current;
+        setUseProxyFallback(true);
+        return;
+      }
+      setHasError(true);
+      setErrorMessage('Video tidak dapat diputar saat ini. Coba muat ulang atau pilih episode lain.');
+    };
+
+    const handleLoadedMetadata = () => {
+      if (disposed) return;
+      setDuration(video.duration || 0);
+      setIsLoading(false);
+      setHasError(false);
+      applyPendingResume();
+    };
+
     const handleTimeUpdate = () => {
-      setCurrentTime(video.currentTime);
+      if (disposed) return;
+      const ct = video.currentTime;
+      const dur = video.duration || 0;
+      setCurrentTime(ct);
       if (video.buffered.length > 0) {
         setBufferedTime(video.buffered.end(video.buffered.length - 1));
       }
-      if (onTimeUpdate && video.duration) {
-        onTimeUpdate(video.currentTime, video.duration);
+      if (onTimeUpdateRef.current && dur > 0) {
+        onTimeUpdateRef.current(ct, dur);
       }
     };
 
     const handleProgress = () => {
+      if (disposed) return;
       if (video.buffered.length > 0) {
         setBufferedTime(video.buffered.end(video.buffered.length - 1));
       }
     };
 
-    let waitingTimeout: NodeJS.Timeout | null = null;
-
     const handleWaiting = () => {
       if (waitingTimeout) clearTimeout(waitingTimeout);
       waitingTimeout = setTimeout(() => {
-        setIsLoading(true);
+        if (!disposed) setIsLoading(true);
       }, 600);
     };
 
     const handleCanPlay = () => {
       if (waitingTimeout) clearTimeout(waitingTimeout);
-      setIsLoading(false);
+      if (!disposed) setIsLoading(false);
     };
 
     const handlePlaying = () => {
       if (waitingTimeout) clearTimeout(waitingTimeout);
-      setIsPlaying(true);
-      setIsLoading(false);
+      if (!disposed) {
+        setIsPlaying(true);
+        setIsLoading(false);
+      }
     };
-    const handlePause = () => setIsPlaying(false);
+
+    const handlePause = () => {
+      if (!disposed) setIsPlaying(false);
+    };
 
     const handleEnded = () => {
+      if (disposed) return;
       setIsPlaying(false);
-      if (onEnded) onEnded();
+      if (onEndedRef.current) onEndedRef.current();
     };
 
     const handleError = () => {
-      handleVideoError();
+      triggerFallbackOrError();
     };
 
     video.addEventListener('loadedmetadata', handleLoadedMetadata);
@@ -268,7 +246,62 @@ export default function VideoPlayer({
     video.addEventListener('ended', handleEnded);
     video.addEventListener('error', handleError);
 
+    if (stream.includes('.m3u8')) {
+      if (Hls.isSupported()) {
+        const hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: false,
+          backBufferLength: 30,
+          maxBufferLength: 30,
+          maxMaxBufferLength: 60,
+          maxBufferSize: 40 * 1000 * 1000,
+          maxBufferHole: 0.5,
+          fragLoadingTimeOut: 20000,
+          manifestLoadingTimeOut: 15000,
+        });
+        hls.loadSource(stream);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          if (disposed) return;
+          setIsLoading(false);
+          applyPendingResume();
+          video.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+        });
+        hls.on(Hls.Events.ERROR, (_, data) => {
+          if (!data.fatal || disposed) return;
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            hls.startLoad();
+          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            hls.recoverMediaError();
+          } else {
+            triggerFallbackOrError();
+          }
+        });
+        hlsRef.current = hls;
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = stream;
+        video.play().catch(() => setIsPlaying(false));
+      }
+    } else {
+      video.src = stream;
+      video.load();
+      video.play()
+        .then(() => {
+          if (!disposed) {
+            setIsPlaying(true);
+            setIsLoading(false);
+          }
+        })
+        .catch(() => {
+          if (!disposed) {
+            setIsPlaying(false);
+            setIsLoading(false);
+          }
+        });
+    }
+
     return () => {
+      disposed = true;
       video.removeEventListener('loadedmetadata', handleLoadedMetadata);
       video.removeEventListener('timeupdate', handleTimeUpdate);
       video.removeEventListener('progress', handleProgress);
@@ -285,21 +318,13 @@ export default function VideoPlayer({
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
     };
-  }, [activeUrl, initialTime]);
+  }, [activeUrl, useProxyFallback, resolveStreamUrl]);
 
-  const handleVideoError = () => {
-    setIsLoading(false);
-    const nextMirror = backupMirrors.find((m) => m !== activeUrl) || backupMirrors[0];
-    if (activeUrl !== nextMirror) {
-      setActiveUrl(nextMirror);
-    } else {
-      setHasError(true);
-      setErrorMessage('Video tidak dapat diputar dari sumber saat ini.');
-    }
-  };
-
-  const togglePlay = () => {
+  const togglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
 
@@ -307,16 +332,16 @@ export default function VideoPlayer({
       video
         .play()
         .then(() => setIsPlaying(true))
-        .catch((err) => {
+        .catch(() => {
           video.muted = true;
           setIsMuted(true);
-          video.play().then(() => setIsPlaying(true));
+          video.play().then(() => setIsPlaying(true)).catch(() => {});
         });
     } else {
       video.pause();
       setIsPlaying(false);
     }
-  };
+  }, []);
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const time = Number(e.target.value);
@@ -327,28 +352,29 @@ export default function VideoPlayer({
     }
   };
 
-  const skipSeconds = (seconds: number) => {
+  const skipSeconds = useCallback((seconds: number) => {
     const video = videoRef.current;
     if (video) {
       video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + seconds));
     }
-  };
+  }, []);
 
-  const toggleMute = () => {
+  const toggleMute = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
-    video.muted = !isMuted;
-    setIsMuted(!isMuted);
-  };
+    const nextMuted = !video.muted;
+    video.muted = nextMuted;
+    setIsMuted(nextMuted);
+  }, []);
 
-  const toggleFullscreen = () => {
+  const toggleFullscreen = useCallback(() => {
     if (!containerRef.current) return;
     if (!document.fullscreenElement) {
       containerRef.current.requestFullscreen().catch(() => {});
     } else {
       document.exitFullscreen().catch(() => {});
     }
-  };
+  }, []);
 
   // Keyboard controls like YouTube (Space = play/pause, ArrowLeft/Right = seek 10s, F = fullscreen, M = mute)
   useEffect(() => {
@@ -375,7 +401,7 @@ export default function VideoPlayer({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isPlaying, isMuted]);
+  }, [togglePlay, skipSeconds, toggleFullscreen, toggleMute]);
 
   const changeSpeed = (speed: number) => {
     setPlaybackSpeed(speed);
@@ -385,33 +411,11 @@ export default function VideoPlayer({
     setShowSettings(false);
   };
 
-  const applyCustomUrl = () => {
-    if (customStreamInput.trim()) {
-      const target = customStreamInput.trim();
-      setActiveUrl(target);
-      if (onActiveUrlChange) {
-        onActiveUrlChange(target);
-      }
-      setShowApiModal(false);
-    }
-  };
-
-  const saveApiKey = () => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('dracin_api_key', apiKeyInput.trim());
-      setApiKeySaved(true);
-      setTimeout(() => {
-        setApiKeySaved(false);
-        window.location.reload();
-      }, 800);
-    }
-  };
-
   const handleMouseMove = () => {
     setShowControls(true);
     if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
     controlsTimeoutRef.current = setTimeout(() => {
-      if (isPlaying) setShowControls(false);
+      if (videoRef.current && !videoRef.current.paused) setShowControls(false);
     }, 3500);
   };
 
@@ -426,6 +430,7 @@ export default function VideoPlayer({
     <div
       ref={containerRef}
       onMouseMove={handleMouseMove}
+      onDoubleClick={toggleFullscreen}
       className="relative aspect-video w-full overflow-hidden rounded-2xl bg-black border border-white/10 shadow-2xl group select-none flex items-center justify-center"
     >
       <video
@@ -436,9 +441,9 @@ export default function VideoPlayer({
         className="h-full w-full object-contain cursor-pointer bg-black"
       />
 
-      {/* Loading Spinner (only while actively playing or buffering) */}
+      {/* Loading Spinner (only when stalled >600ms while playing) */}
       {isLoading && isPlaying && !hasError && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 pointer-events-none z-20">
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/50 pointer-events-none z-20">
           <Loader2 className="h-12 w-12 text-rose-500 animate-spin mb-2" />
           <p className="text-xs font-semibold text-gray-300">Memuat Video Episode {episodeNumber}...</p>
         </div>
@@ -454,19 +459,12 @@ export default function VideoPlayer({
             <button
               onClick={() => {
                 setHasError(false);
-                setActiveUrl(backupMirrors[0]);
+                setUseProxyFallback((prev) => !prev);
               }}
               className="flex items-center gap-2 rounded-xl bg-rose-600 hover:bg-rose-500 px-4 py-2 text-xs font-bold text-white transition-all shadow"
             >
               <RefreshCw className="h-4 w-4" />
-              Putar Server Cadangan
-            </button>
-            <button
-              onClick={() => setShowApiModal(true)}
-              className="flex items-center gap-2 rounded-xl bg-white/10 hover:bg-white/20 px-4 py-2 text-xs font-bold text-white transition-all border border-white/10"
-            >
-              <LinkIcon className="h-4 w-4" />
-              Input URL / API Key
+              {useProxyFallback ? 'Coba Koneksi Langsung (CDN)' : 'Coba Server Proxy VPS'}
             </button>
           </div>
         </div>
@@ -498,12 +496,14 @@ export default function VideoPlayer({
             <h2 className="text-sm sm:text-base font-bold drop-shadow">{title}</h2>
             <p className="text-xs text-rose-400 font-semibold">Episode {episodeNumber}</p>
           </div>
-
           <div className="flex items-center gap-2">
-            {/* Native clean player header */}
+            <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-white/10 text-gray-300 border border-white/10">
+              {activeUrl.includes('.m3u8') || useProxyFallback ? 'Server VPS' : 'Direct CDN'}
+            </span>
           </div>
         </div>
       </div>
+
       {/* Bottom Controls Overlay */}
       <div
         className={`absolute bottom-0 left-0 right-0 p-3 sm:p-5 bg-gradient-to-t from-black/95 via-black/70 to-transparent transition-opacity duration-300 z-20 ${
@@ -512,7 +512,6 @@ export default function VideoPlayer({
       >
         {/* Progress Bar with Buffered Visual Indicator */}
         <div className="relative mb-3 flex items-center">
-          {/* Buffered track overlay */}
           <div className="absolute inset-x-0 h-1.5 bg-white/20 rounded-lg overflow-hidden pointer-events-none">
             <div
               className="h-full bg-white/30 transition-all duration-300"
@@ -569,7 +568,7 @@ export default function VideoPlayer({
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3">
-            {/* Speed / Settings Toggle */}
+            {/* Speed / Quality / Server Settings */}
             <div className="relative">
               <button
                 onClick={() => setShowSettings(!showSettings)}
@@ -580,7 +579,7 @@ export default function VideoPlayer({
               </button>
 
               {showSettings && (
-                <div className="absolute right-0 bottom-full mb-2 w-44 rounded-xl bg-gray-900/95 border border-white/10 p-2 shadow-2xl backdrop-blur-md space-y-2 z-50">
+                <div className="absolute right-0 bottom-full mb-2 w-48 rounded-xl bg-gray-900/95 border border-white/10 p-2 shadow-2xl backdrop-blur-md space-y-2 z-50">
                   {/* Resolution / Quality Switcher */}
                   {qualities && qualities.length > 0 && (
                     <div>
@@ -592,16 +591,10 @@ export default function VideoPlayer({
                             <button
                               key={q.quality}
                               onClick={() => {
-                                const curr = videoRef.current?.currentTime || 0;
+                                pendingResumeTimeRef.current = videoRef.current?.currentTime || 0;
                                 setActiveUrl(q.videoUrl);
-                                if (onActiveUrlChange) onActiveUrlChange(q.videoUrl);
+                                if (onActiveUrlChangeRef.current) onActiveUrlChangeRef.current(q.videoUrl);
                                 setShowSettings(false);
-                                setTimeout(() => {
-                                  if (videoRef.current) {
-                                    videoRef.current.currentTime = curr;
-                                    videoRef.current.play().catch(() => {});
-                                  }
-                                }, 150);
                               }}
                               className={`w-full text-left px-2 py-1 text-xs rounded transition-colors flex items-center justify-between ${
                                 isActive ? 'bg-rose-600 text-white font-bold' : 'hover:bg-white/10 text-gray-200'
@@ -633,6 +626,27 @@ export default function VideoPlayer({
                       ))}
                     </div>
                   </div>
+
+                  {/* Server Routing Mode for MP4 */}
+                  {!activeUrl.includes('.m3u8') && (
+                    <div className="border-t border-white/10 pt-1">
+                      <p className="text-[10px] font-bold text-gray-400 px-2 py-1 uppercase">Jalur Streaming</p>
+                      <button
+                        onClick={() => {
+                          pendingResumeTimeRef.current = videoRef.current?.currentTime || 0;
+                          setUseProxyFallback((prev) => !prev);
+                          setShowSettings(false);
+                        }}
+                        className="w-full text-left px-2 py-1.5 text-xs rounded bg-white/5 hover:bg-white/15 text-gray-200 flex items-center justify-between"
+                      >
+                        <span className="flex items-center gap-1.5">
+                          <Server className="h-3.5 w-3.5 text-rose-400" />
+                          {useProxyFallback ? 'Proxy VPS' : 'Direct CDN'}
+                        </span>
+                        <span className="text-[10px] text-rose-400">Ganti</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

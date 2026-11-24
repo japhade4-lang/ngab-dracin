@@ -3,11 +3,11 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-// Get appropriate cache directory for VPS or local development
+const VPS_CACHE_DIR = '/var/cache/nginx/dracin_videos';
+
 function getCacheDir(): string {
-  const vpsCacheDir = '/var/cache/nginx/dracin_videos';
-  if (fs.existsSync(vpsCacheDir)) {
-    return vpsCacheDir;
+  if (fs.existsSync(VPS_CACHE_DIR)) {
+    return VPS_CACHE_DIR;
   }
   const localDir = path.join(process.cwd(), '.video_cache');
   if (!fs.existsSync(localDir)) {
@@ -27,6 +27,11 @@ export async function GET(req: NextRequest) {
   }
 
   try {
+    const parsedTarget = new URL(url);
+    const pathname = parsedTarget.pathname.toLowerCase();
+    const isM3U8 = pathname.endsWith('.m3u8') || url.includes('.m3u8');
+    const isTsSegment = pathname.endsWith('.ts') || url.includes('.ts');
+
     const referer =
       source === 'dramabox'
         ? 'https://www.dramabox.com/'
@@ -42,11 +47,8 @@ export async function GET(req: NextRequest) {
       Accept: '*/*',
     };
 
-    const isM3U8 = url.includes('.m3u8');
-    const isTsSegment = url.includes('.ts');
-
     // =========================================================================
-    // 1. HLS PLAYLIST REWRITING (.m3u8)
+    // 1. HLS PLAYLIST REWRITING (.m3u8) — Required for CORS on Hls.js browsers
     // =========================================================================
     if (isM3U8) {
       const upstreamResponse = await fetch(url, { headers: forwardHeaders });
@@ -55,9 +57,8 @@ export async function GET(req: NextRequest) {
       }
 
       const playlistText = await upstreamResponse.text();
-      const parsedUrl = new URL(url);
       const basePath = url.substring(0, url.lastIndexOf('/') + 1);
-      const searchParams = parsedUrl.search; // preserves ?auth_key=...
+      const searchParams = parsedTarget.search; // preserves ?auth_key=...
 
       const rewrittenLines = playlistText.split('\n').map((line) => {
         const trimmed = line.trim();
@@ -67,7 +68,7 @@ export async function GET(req: NextRequest) {
           if (trimmed.includes('URI="')) {
             return trimmed.replace(/URI="([^"]+)"/, (_, uri) => {
               const fullKeyUrl = uri.startsWith('http') ? uri : `${basePath}${uri}${searchParams}`;
-              return `URI="/api/proxy/video?url=${encodeURIComponent(fullKeyUrl)}&source=${source}"`;
+              return `URI="/api/proxy/video?url=${encodeURIComponent(fullKeyUrl)}&source=${encodeURIComponent(source)}"`;
             });
           }
           return line;
@@ -80,104 +81,97 @@ export async function GET(req: NextRequest) {
           segmentAbsoluteUrl = `${trimmed}${searchParams}`;
         }
 
-        return `/api/proxy/video?url=${encodeURIComponent(segmentAbsoluteUrl)}&source=${source}`;
+        return `/api/proxy/video?url=${encodeURIComponent(segmentAbsoluteUrl)}&source=${encodeURIComponent(source)}`;
       });
 
-      const resHeaders = new Headers();
-      resHeaders.set('Content-Type', 'application/vnd.apple.mpegurl');
-      resHeaders.set('Access-Control-Allow-Origin', '*');
-      resHeaders.set('Cache-Control', 'public, max-age=3600');
       return new NextResponse(rewrittenLines.join('\n'), {
         status: 200,
-        headers: resHeaders,
+        headers: {
+          'Content-Type': 'application/vnd.apple.mpegurl',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=3600',
+        },
       });
     }
 
     // =========================================================================
-    // 2. VIDEO SEGMENTS (.ts) & STANDALONE VIDEOS (.mp4)
+    // 2. HLS VIDEO SEGMENTS (.ts) — Direct 200 response or internal X-Accel-Redirect
+    //    (Never 302 redirect so Hls.js never wastes an extra HTTP round-trip!)
     // =========================================================================
-    // Generate unique MD5 hash for the URL (stripping ephemeral auth params for cache reuse if desired)
-    const urlHash = crypto.createHash('md5').update(url).digest('hex');
-    const ext = isTsSegment ? '.ts' : '.mp4';
     const cacheDir = getCacheDir();
-    const cachedFilePath = path.join(cacheDir, `${urlHash}${ext}`);
-    const mimeType = isTsSegment ? 'video/MP2T' : 'video/mp4';
+    const isVpsNginx = cacheDir === VPS_CACHE_DIR;
 
-    // If file is not yet cached locally on VPS SSD, download it once at full 80MB/s line rate
-    if (!fs.existsSync(cachedFilePath)) {
-      const downloadRes = await fetch(url, { headers: forwardHeaders });
-      if (downloadRes.ok) {
-        const buffer = Buffer.from(await downloadRes.arrayBuffer());
-        try {
-          const tempPath = `${cachedFilePath}.tmp.${Date.now()}`;
-          fs.writeFileSync(tempPath, buffer);
-          fs.renameSync(tempPath, cachedFilePath);
-        } catch (e) {
-          console.warn('[Video Cache] Could not write cache file:', e);
+    if (isTsSegment) {
+      const urlHash = crypto.createHash('md5').update(url).digest('hex');
+      const cachedFilePath = path.join(cacheDir, `${urlHash}.ts`);
+
+      if (fs.existsSync(cachedFilePath)) {
+        if (isVpsNginx) {
+          return new NextResponse(null, {
+            status: 200,
+            headers: {
+              'X-Accel-Redirect': `/internal-video-cache/${urlHash}.ts`,
+              'Content-Type': 'video/MP2T',
+              'Access-Control-Allow-Origin': '*',
+              'Cache-Control': 'public, max-age=604800, immutable',
+            },
+          });
         }
-      }
-    }
-
-    // Check if we now have the local cached file
-    if (fs.existsSync(cachedFilePath)) {
-      // If running on VPS with NGINX, redirect to native NGINX sendfile route for zero-copy, hardware-accelerated streaming without chunked encoding
-      if (cacheDir === '/var/cache/nginx/dracin_videos') {
-        return new NextResponse(null, {
-          status: 302,
+        const buf = await fs.promises.readFile(cachedFilePath);
+        return new NextResponse(buf as unknown as BodyInit, {
+          status: 200,
           headers: {
-            Location: `/video-cache/${urlHash}${ext}`,
+            'Content-Type': 'video/MP2T',
+            'Content-Length': String(buf.byteLength),
             'Access-Control-Allow-Origin': '*',
             'Cache-Control': 'public, max-age=604800, immutable',
           },
         });
       }
 
-      const stat = fs.statSync(cachedFilePath);
-      const fileSize = stat.size;
-      const rangeHeader = req.headers.get('range');
-
-      let start = 0;
-      let end = fileSize - 1;
-      let status = 200;
-
-      if (rangeHeader) {
-        const parts = rangeHeader.replace(/bytes=/, '').split('-');
-        start = parseInt(parts[0], 10);
-        end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-        if (end >= fileSize) end = fileSize - 1;
-        status = 206;
+      const upstreamRes = await fetch(url, { headers: forwardHeaders });
+      if (!upstreamRes.ok) {
+        return new NextResponse('Segment fetch failed', { status: upstreamRes.status });
       }
+      const buffer = Buffer.from(await upstreamRes.arrayBuffer());
 
-      const chunkSize = end - start + 1;
-      const fd = fs.openSync(cachedFilePath, 'r');
-      const chunkBuffer = Buffer.alloc(chunkSize);
-      fs.readSync(fd, chunkBuffer, 0, chunkSize, start);
-      fs.closeSync(fd);
+      // Save to disk cache asynchronously in background without blocking the client response
+      const tempPath = `${cachedFilePath}.tmp.${Date.now()}`;
+      fs.promises
+        .writeFile(tempPath, buffer)
+        .then(() => fs.promises.rename(tempPath, cachedFilePath))
+        .catch(() => {});
 
-      const resHeaders = new Headers();
-      resHeaders.set('Content-Type', mimeType);
-      resHeaders.set('Content-Length', String(chunkSize));
-      resHeaders.set('Accept-Ranges', 'bytes');
-      resHeaders.set('Access-Control-Allow-Origin', '*');
-      resHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-      resHeaders.set('Access-Control-Allow-Headers', 'Range, Content-Type');
-      resHeaders.set('Cache-Control', 'public, max-age=604800, immutable');
-      resHeaders.set('X-Proxy-Cache', 'HIT');
-
-      if (status === 206) {
-        resHeaders.set('Content-Range', `bytes ${start}-${end}/${fileSize}`);
-      }
-
-      // Return real Buffer with Content-Length header so browser never receives 'Transfer-Encoding: chunked'
-      return new NextResponse(chunkBuffer as unknown as BodyInit, {
-        status,
-        headers: resHeaders,
+      return new NextResponse(buffer as unknown as BodyInit, {
+        status: 200,
+        headers: {
+          'Content-Type': 'video/MP2T',
+          'Content-Length': String(buffer.byteLength),
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=604800, immutable',
+        },
       });
     }
 
     // =========================================================================
-    // 3. FALLBACK: LIVE PROXY WITH STRICT CONTENT-LENGTH
+    // 3. MP4 FALLBACK PROXY (Zero-stall Range forwarding with strict Content-Length)
     // =========================================================================
+    const urlHash = crypto.createHash('md5').update(url).digest('hex');
+    const cachedMp4Path = path.join(cacheDir, `${urlHash}.mp4`);
+
+    if (fs.existsSync(cachedMp4Path) && isVpsNginx) {
+      return new NextResponse(null, {
+        status: 200,
+        headers: {
+          'X-Accel-Redirect': `/internal-video-cache/${urlHash}.mp4`,
+          'Content-Type': 'video/mp4',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=604800, immutable',
+        },
+      });
+    }
+
+    // Never block waiting for full 25MB+ MP4 download: forward exact Range chunk directly!
     const range = req.headers.get('range');
     if (range) {
       forwardHeaders['range'] = range;
@@ -186,24 +180,23 @@ export async function GET(req: NextRequest) {
     const upstreamResponse = await fetch(url, { headers: forwardHeaders });
     const buffer = Buffer.from(await upstreamResponse.arrayBuffer());
 
-    const fallbackHeaders = new Headers();
-    fallbackHeaders.set('Content-Type', mimeType);
-    fallbackHeaders.set('Content-Length', String(buffer.byteLength));
-    fallbackHeaders.set('Accept-Ranges', 'bytes');
-    fallbackHeaders.set('Access-Control-Allow-Origin', '*');
-    fallbackHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    fallbackHeaders.set('Access-Control-Allow-Headers', 'Range, Content-Type');
-    fallbackHeaders.set('Cache-Control', 'public, max-age=86400');
-    fallbackHeaders.set('X-Proxy-Cache', 'PASS');
+    const headers = new Headers();
+    headers.set('Content-Type', upstreamResponse.headers.get('content-type') || 'video/mp4');
+    headers.set('Content-Length', String(buffer.byteLength));
+    headers.set('Accept-Ranges', 'bytes');
+    headers.set('Access-Control-Allow-Origin', '*');
+    headers.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    headers.set('Access-Control-Allow-Headers', 'Range, Content-Type');
+    headers.set('Cache-Control', 'public, max-age=86400');
 
     const contentRange = upstreamResponse.headers.get('content-range');
     if (contentRange) {
-      fallbackHeaders.set('Content-Range', contentRange);
+      headers.set('Content-Range', contentRange);
     }
 
     return new NextResponse(buffer as unknown as BodyInit, {
       status: upstreamResponse.status,
-      headers: fallbackHeaders,
+      headers,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Proxy fetch failed';
@@ -218,6 +211,7 @@ export async function OPTIONS() {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
       'Access-Control-Allow-Headers': 'Range, Content-Type',
+      'Access-Control-Max-Age': '86400',
     },
   });
 }
