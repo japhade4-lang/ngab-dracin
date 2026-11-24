@@ -1,16 +1,18 @@
-import { fetchTrending, fetchForYou, fetchDubbedDramas } from '@/lib/api';
+import { fetchTrending, fetchForYou, fetchDubbedDramas, fetchLatestDramas } from '@/lib/api';
 import HeroBanner from '@/components/HeroBanner';
 import HorizontalSection from '@/components/HorizontalSection';
+import LatestDramasSection from '@/components/LatestDramasSection';
 import { Flame, Sparkles, Volume2, Film } from 'lucide-react';
 import Link from 'next/link';
 
-export const revalidate = 1800; // ISR cache every 30 minutes
+export const revalidate = 60; // Revalidate every 60 seconds
 
 export default async function HomePage() {
-  const [trendingDramas, forYouDramas, dubbedDramas] = await Promise.all([
+  const [trendingDramas, forYouDramas, dubbedDramas, latestDramas] = await Promise.all([
     fetchTrending('dramabox'),
     fetchForYou('dramabox'),
     fetchDubbedDramas(),
+    fetchLatestDramas(40),
   ]);
 
   const heroDramas = trendingDramas.slice(0, 5);
@@ -23,6 +25,7 @@ export default async function HomePage() {
       {/* Quick Category Chips */}
       <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-2">
         {[
+          { label: '✨ Baru Rilis (Auto-Update)', href: '/terbaru' },
           { label: '🔥 Semua Trending', href: '/trending' },
           { label: '🎙️ Dubbing Indonesia', href: '/dubindo' },
           { label: '⚡ Shorts Drama', href: '/shorts' },
@@ -40,6 +43,9 @@ export default async function HomePage() {
           </Link>
         ))}
       </div>
+
+      {/* Live Auto-Refresh Latest Dramas Section */}
+      <LatestDramasSection initialDramas={latestDramas} />
 
       {/* Sulih Suara Indonesia Section */}
       <HorizontalSection

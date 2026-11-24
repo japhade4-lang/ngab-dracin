@@ -9,6 +9,7 @@ export default function Navbar() {
 
   const navLinks = [
     { label: 'Beranda', href: '/', icon: Film },
+    { label: 'Terbaru', href: '/terbaru', icon: Sparkles, badge: 'NEW' },
     { label: 'Shorts', href: '/shorts', icon: Flame, badge: 'HOT' },
     { label: 'Dub Indo', href: '/dubindo', icon: Mic2, badge: 'DUB' },
     { label: 'Trending', href: '/trending', icon: Sparkles },

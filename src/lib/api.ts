@@ -109,6 +109,66 @@ export async function fetchTrending(source: DramaSource = 'dramabox'): Promise<D
 }
 
 /**
+ * Fetch latest & newly released dramas across platforms (DramaBox Latest & ShortMax New)
+ */
+export async function fetchLatestDramas(limit: number = 40): Promise<Drama[]> {
+  const dramas: Drama[] = [];
+
+  // 1. DramaBox Latest
+  try {
+    const res = await fetch(`${DRAMABOX_BASE}/api/dramabox/latest?lang=in`, {
+      headers: { 'x-token': DRAMABUZZ_KEY },
+      next: { revalidate: 60 },
+      signal: AbortSignal.timeout(4000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        for (const item of data) {
+          const d = normalizeDramaboxItem(item);
+          d.tags = ['Baru Rilis', ...(d.tags || [])];
+          dramas.push(d);
+          dramaDetailCache.set(`dramabox_${d.id}`, d);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[API] DramaBox latest error:', err);
+  }
+
+  // 2. ShortMax New
+  try {
+    const res = await fetch(`${SHORTMAX_BASE}/api/v1/new?lang=id&code=${DRAMABUZZ_KEY}`, {
+      next: { revalidate: 60 },
+      signal: AbortSignal.timeout(4000),
+    });
+    if (res.ok) {
+      const json = await res.json();
+      const items = json?.data || [];
+      if (Array.isArray(items)) {
+        for (const item of items) {
+          const d = normalizeShortmaxItem(item);
+          d.tags = ['Baru Rilis', ...(d.tags || [])];
+          dramas.push(d);
+          dramaDetailCache.set(`shortmax_${d.id}`, d);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[API] ShortMax new error:', err);
+  }
+
+  if (dramas.length > 0) {
+    return dramas.slice(0, limit);
+  }
+
+  return (await fetchTrending()).map((d) => ({
+    ...d,
+    tags: ['Baru Rilis', ...(d.tags || [])],
+  }));
+}
+
+/**
  * Fetch For You / Explore catalog
  */
 export async function fetchForYou(source: DramaSource = 'dramabox'): Promise<Drama[]> {

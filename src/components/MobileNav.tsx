@@ -2,16 +2,16 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Film, Flame, Mic2, Search, Bookmark } from 'lucide-react';
+import { Film, Flame, Mic2, Sparkles, Bookmark } from 'lucide-react';
 
 export default function MobileNav() {
   const pathname = usePathname();
 
   const links = [
     { label: 'Beranda', href: '/', icon: Film },
+    { label: 'Terbaru', href: '/terbaru', icon: Sparkles },
     { label: 'Shorts', href: '/shorts', icon: Flame },
     { label: 'Dub Indo', href: '/dubindo', icon: Mic2 },
-    { label: 'Cari', href: '/search', icon: Search },
     { label: 'Koleksi', href: '/library', icon: Bookmark },
   ];
 
