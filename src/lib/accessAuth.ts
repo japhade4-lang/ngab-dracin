@@ -12,12 +12,12 @@ export const DEVICE_COOKIE = 'dracin_device';
 export const ADMIN_COOKIE = 'dracin_admin';
 
 export async function getServerAccessStatus(): Promise<PublicAccessStatus> {
-  const db = getAccessDb();
+  const db = await getAccessDb();
   const cookieStore = await cookies();
   const sessionToken = cookieStore.get(ACCESS_COOKIE)?.value;
   const deviceId = cookieStore.get(DEVICE_COOKIE)?.value;
 
-  const check = checkSessionAccess(sessionToken, deviceId);
+  const check = await checkSessionAccess(sessionToken, deviceId);
 
   if (check.valid && check.voucher) {
     return {
@@ -54,7 +54,7 @@ export async function isServerEpisodeAllowed(episodeNumber: number): Promise<{
 export async function isServerAdminAuthenticated(): Promise<boolean> {
   const cookieStore = await cookies();
   const token = cookieStore.get(ADMIN_COOKIE)?.value;
-  const payload = verifySignedToken<{ role?: string; exp?: number }>(token);
+  const payload = await verifySignedToken<{ role?: string; exp?: number }>(token);
   if (!payload || payload.role !== 'admin') return false;
   if (payload.exp && Date.now() > payload.exp) return false;
   return true;

@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const password = String(body?.password || '');
 
-    if (!verifyAdminPassword(password)) {
+    if (!(await verifyAdminPassword(password))) {
       return NextResponse.json(
         { success: false, error: 'Password admin salah.' },
         { status: 401 }
@@ -23,7 +23,7 @@ export async function POST(req: NextRequest) {
 
     const isHttps =
       req.headers.get('x-forwarded-proto') === 'https' || req.nextUrl.protocol === 'https:';
-    const token = createSignedToken({
+    const token = await createSignedToken({
       role: 'admin',
       exp: Date.now() + 7 * 24 * 3600 * 1000,
     });

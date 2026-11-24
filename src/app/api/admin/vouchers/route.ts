@@ -16,7 +16,7 @@ export async function GET() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const db = getAccessDb();
+  const db = await getAccessDb();
   const now = Date.now();
 
   let activeCount = 0;
@@ -53,7 +53,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const created = createVouchers({
+    const created = await createVouchers({
       days: Number(body?.days || 1),
       price: body?.price !== undefined ? Number(body.price) : undefined,
       planName: body?.planName ? String(body.planName) : undefined,
@@ -77,17 +77,17 @@ export async function PATCH(req: NextRequest) {
     const body = await req.json();
 
     if (body?.action === 'updateSettings') {
-      const settings = updateAccessSettings(body.settings || {});
+      const settings = await updateAccessSettings(body.settings || {});
       return NextResponse.json({ success: true, settings });
     }
 
     if (body?.action === 'updatePlans') {
-      const plans = updateTariffPlans(body.plans || []);
+      const plans = await updateTariffPlans(body.plans || []);
       return NextResponse.json({ success: true, plans });
     }
 
     if (body?.action === 'changePassword') {
-      const ok = changeAdminPassword(String(body.newPassword || ''));
+      const ok = await changeAdminPassword(String(body.newPassword || ''));
       if (!ok) {
         return NextResponse.json(
           { success: false, error: 'Password minimal 4 karakter.' },
@@ -101,7 +101,7 @@ export async function PATCH(req: NextRequest) {
       body?.code &&
       ['revoke', 'restore', 'resetDevices', 'delete'].includes(body?.action)
     ) {
-      const ok = updateVoucherStatus(String(body.code), body.action);
+      const ok = await updateVoucherStatus(String(body.code), body.action);
       return NextResponse.json({ success: ok });
     }
 
@@ -121,6 +121,6 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Kode wajib diisi.' }, { status: 400 });
   }
 
-  const ok = updateVoucherStatus(code, 'delete');
+  const ok = await updateVoucherStatus(code, 'delete');
   return NextResponse.json({ success: ok });
 }

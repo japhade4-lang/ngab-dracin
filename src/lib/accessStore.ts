@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { getCloudflareContext } from '@opennextjs/cloudflare';
 import {
   AccessDatabase,
   AccessSettings,
@@ -10,6 +11,12 @@ import {
 
 const DB_DIR = path.join(process.cwd(), 'data');
 const DB_PATH = path.join(DB_DIR, 'access-db.json');
+const KV_KEY = 'access_db_v1';
+
+interface KvLike {
+  get(key: string, type: 'json'): Promise<unknown>;
+  put(key: string, value: string): Promise<void>;
+}
 
 const DEFAULT_PLANS: TariffPlan[] = [
   { id: '1d', name: '1 Hari', days: 1, durationHours: 24, price: 5000, badge: 'Harian' },
@@ -47,7 +54,43 @@ function createInitialDb(): AccessDatabase {
   };
 }
 
-function saveDb(db: AccessDatabase): void {
+function normalizeDb(parsed: Partial<AccessDatabase> | null | undefined): AccessDatabase {
+  const initial = createInitialDb();
+  if (!parsed) return initial;
+  return {
+    authSecret: parsed.authSecret || initial.authSecret,
+    adminPasswordHash: parsed.adminPasswordHash || initial.adminPasswordHash,
+    adminPasswordCustomized: parsed.adminPasswordCustomized,
+    plans: Array.isArray(parsed.plans) && parsed.plans.length > 0 ? parsed.plans : DEFAULT_PLANS,
+    settings: { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) },
+    vouchers: Array.isArray(parsed.vouchers) ? parsed.vouchers : [],
+  };
+}
+
+async function getKvNamespace(): Promise<KvLike | null> {
+  try {
+    const ctx = await getCloudflareContext({ async: true });
+    const env = ctx?.env as Record<string, unknown> | undefined;
+    const kv = env?.DRACIN_ACCESS_KV as KvLike | undefined;
+    if (kv && typeof kv.get === 'function' && typeof kv.put === 'function') {
+      return kv;
+    }
+  } catch {
+    // Not running in Cloudflare Worker context (e.g. VPS Node.js or build step)
+  }
+  return null;
+}
+
+async function saveDb(db: AccessDatabase, kv: KvLike | null): Promise<void> {
+  if (kv) {
+    try {
+      await kv.put(KV_KEY, JSON.stringify(db));
+    } catch (err) {
+      console.error('[AccessDB] Failed to persist to Cloudflare KV:', err);
+    }
+    return;
+  }
+
   try {
     if (!fs.existsSync(DB_DIR)) {
       fs.mkdirSync(DB_DIR, { recursive: true });
@@ -55,37 +98,46 @@ function saveDb(db: AccessDatabase): void {
     const tmp = `${DB_PATH}.tmp.${process.pid}`;
     fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf-8');
     fs.renameSync(tmp, DB_PATH);
+    globalThis.__dracinAccessDb = db;
   } catch (err) {
-    console.error('[AccessDB] Failed to persist database:', err);
+    console.error('[AccessDB] Failed to persist local JSON database:', err);
   }
 }
 
-export function getAccessDb(): AccessDatabase {
+export async function getAccessDb(): Promise<AccessDatabase> {
+  const kv = await getKvNamespace();
+  if (kv) {
+    try {
+      const existing = (await kv.get(KV_KEY, 'json')) as Partial<AccessDatabase> | null;
+      if (existing) {
+        return normalizeDb(existing);
+      }
+      const created = createInitialDb();
+      await kv.put(KV_KEY, JSON.stringify(created));
+      return created;
+    } catch (err) {
+      console.warn('[AccessDB] KV read error, falling back to ephemeral DB:', err);
+      return createInitialDb();
+    }
+  }
+
   if (globalThis.__dracinAccessDb) {
     return globalThis.__dracinAccessDb;
   }
 
-  if (fs.existsSync(DB_PATH)) {
-    try {
+  try {
+    if (fs.existsSync(DB_PATH)) {
       const raw = fs.readFileSync(DB_PATH, 'utf-8');
-      const parsed = JSON.parse(raw) as Partial<AccessDatabase>;
-      const initial = createInitialDb();
-      const db: AccessDatabase = {
-        authSecret: parsed.authSecret || initial.authSecret,
-        adminPasswordHash: parsed.adminPasswordHash || initial.adminPasswordHash,
-        plans: Array.isArray(parsed.plans) && parsed.plans.length > 0 ? parsed.plans : DEFAULT_PLANS,
-        settings: { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) },
-        vouchers: Array.isArray(parsed.vouchers) ? parsed.vouchers : [],
-      };
+      const db = normalizeDb(JSON.parse(raw) as Partial<AccessDatabase>);
       globalThis.__dracinAccessDb = db;
       return db;
-    } catch (err) {
-      console.warn('[AccessDB] Corrupt DB file, recreating:', err);
     }
+  } catch (err) {
+    console.warn('[AccessDB] Corrupt local DB file, recreating:', err);
   }
 
   const db = createInitialDb();
-  saveDb(db);
+  await saveDb(db, null);
   globalThis.__dracinAccessDb = db;
   return db;
 }
@@ -98,19 +150,23 @@ function signPayload(payloadB64: string, secret: string): string {
   return crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
 }
 
-export function createSignedToken(payload: object): string {
-  const db = getAccessDb();
+export async function createSignedToken(payload: object): Promise<string> {
+  const db = await getAccessDb();
+  const secret = process.env.AUTH_SECRET || db.authSecret;
   const b64 = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64url');
-  const sig = signPayload(b64, db.authSecret);
+  const sig = signPayload(b64, secret);
   return `${b64}.${sig}`;
 }
 
-export function verifySignedToken<T = Record<string, unknown>>(token: string | undefined): T | null {
+export async function verifySignedToken<T = Record<string, unknown>>(
+  token: string | undefined
+): Promise<T | null> {
   if (!token || !token.includes('.')) return null;
-  const db = getAccessDb();
+  const db = await getAccessDb();
+  const secret = process.env.AUTH_SECRET || db.authSecret;
   const [b64, sig] = token.split('.', 2);
   if (!b64 || !sig) return null;
-  const expected = signPayload(b64, db.authSecret);
+  const expected = signPayload(b64, secret);
   try {
     const a = Buffer.from(sig);
     const b = Buffer.from(expected);
@@ -133,16 +189,17 @@ export interface SessionPayload {
   expiresAt: number;
 }
 
-export function checkSessionAccess(
+export async function checkSessionAccess(
   sessionToken: string | undefined,
   deviceId: string | undefined
-): { valid: boolean; voucher?: Voucher; remainingMs?: number } {
+): Promise<{ valid: boolean; voucher?: Voucher; remainingMs?: number }> {
   if (!sessionToken || !deviceId) return { valid: false };
-  const payload = verifySignedToken<SessionPayload>(sessionToken);
+  const payload = await verifySignedToken<SessionPayload>(sessionToken);
   if (!payload || !payload.code || !payload.deviceId) return { valid: false };
   if (payload.deviceId !== deviceId) return { valid: false };
 
-  const db = getAccessDb();
+  const kv = await getKvNamespace();
+  const db = await getAccessDb();
   const voucher = db.vouchers.find((v) => v.code === payload.code);
   if (!voucher) return { valid: false };
   if (voucher.isRevoked) return { valid: false };
@@ -154,14 +211,14 @@ export function checkSessionAccess(
 
   const device = voucher.devices.find((d) => d.deviceId === deviceId);
   if (!device) {
-    // Device was reset/removed by admin
     return { valid: false };
   }
 
-  // Throttle lastSeenAt updates to once per 5 minutes so disk isn't hammered
-  if (now - device.lastSeenAt > 5 * 60 * 1000) {
+  // Update lastSeenAt sparingly (60 min on KV, 5 min on local disk)
+  const updateInterval = kv ? 60 * 60 * 1000 : 5 * 60 * 1000;
+  if (now - device.lastSeenAt > updateInterval) {
     device.lastSeenAt = now;
-    saveDb(db);
+    await saveDb(db, kv);
   }
 
   return {
@@ -171,19 +228,21 @@ export function checkSessionAccess(
   };
 }
 
-export function redeemVoucherCode(
+export async function redeemVoucherCode(
   rawCode: string,
   deviceId: string,
   userAgent: string
-):
+): Promise<
   | { ok: true; voucher: Voucher; token: string }
-  | { ok: false; error: string } {
+  | { ok: false; error: string }
+> {
   const code = rawCode.trim().toUpperCase();
   if (!code) {
     return { ok: false, error: 'Masukkan kode akses terlebih dahulu.' };
   }
 
-  const db = getAccessDb();
+  const kv = await getKvNamespace();
+  const db = await getAccessDb();
   const voucher = db.vouchers.find((v) => v.code.toUpperCase() === code);
   if (!voucher) {
     return { ok: false, error: 'Kode akses tidak ditemukan. Periksa kembali penulisan kode.' };
@@ -216,7 +275,6 @@ export function redeemVoucherCode(
     existingDevice.userAgent = userAgent.slice(0, 120);
   }
 
-  // First activation starts the countdown clock
   const resolvedExpiresAt =
     voucher.expiresAt || now + voucher.durationHours * 3600 * 1000;
   if (!voucher.activatedAt) {
@@ -224,9 +282,9 @@ export function redeemVoucherCode(
     voucher.expiresAt = resolvedExpiresAt;
   }
 
-  saveDb(db);
+  await saveDb(db, kv);
 
-  const token = createSignedToken({
+  const token = await createSignedToken({
     code: voucher.code,
     deviceId,
     expiresAt: resolvedExpiresAt,
@@ -258,15 +316,16 @@ function generateReadableCode(): string {
   return `DRACIN-${part(4)}-${part(4)}`;
 }
 
-export function createVouchers(params: {
+export async function createVouchers(params: {
   days: number;
   price?: number;
   planName?: string;
   label?: string;
   maxDevices?: number;
   count?: number;
-}): Voucher[] {
-  const db = getAccessDb();
+}): Promise<Voucher[]> {
+  const kv = await getKvNamespace();
+  const db = await getAccessDb();
   const days = Math.max(1, Math.min(365, Math.floor(params.days || 1)));
   const count = Math.max(1, Math.min(25, Math.floor(params.count || 1)));
   const durationHours = days * 24;
@@ -302,15 +361,16 @@ export function createVouchers(params: {
     created.push(voucher);
   }
 
-  saveDb(db);
+  await saveDb(db, kv);
   return created;
 }
 
-export function updateVoucherStatus(
+export async function updateVoucherStatus(
   code: string,
   action: 'revoke' | 'restore' | 'resetDevices' | 'delete'
-): boolean {
-  const db = getAccessDb();
+): Promise<boolean> {
+  const kv = await getKvNamespace();
+  const db = await getAccessDb();
   const idx = db.vouchers.findIndex((v) => v.code === code);
   if (idx === -1) return false;
 
@@ -324,12 +384,15 @@ export function updateVoucherStatus(
     db.vouchers[idx].devices = [];
   }
 
-  saveDb(db);
+  await saveDb(db, kv);
   return true;
 }
 
-export function updateAccessSettings(partial: Partial<AccessSettings>): AccessSettings {
-  const db = getAccessDb();
+export async function updateAccessSettings(
+  partial: Partial<AccessSettings>
+): Promise<AccessSettings> {
+  const kv = await getKvNamespace();
+  const db = await getAccessDb();
   db.settings = {
     freeEpisodes:
       typeof partial.freeEpisodes === 'number'
@@ -352,12 +415,13 @@ export function updateAccessSettings(partial: Partial<AccessSettings>): AccessSe
         ? partial.paymentNote.trim()
         : db.settings.paymentNote,
   };
-  saveDb(db);
+  await saveDb(db, kv);
   return db.settings;
 }
 
-export function updateTariffPlans(plans: TariffPlan[]): TariffPlan[] {
-  const db = getAccessDb();
+export async function updateTariffPlans(plans: TariffPlan[]): Promise<TariffPlan[]> {
+  const kv = await getKvNamespace();
+  const db = await getAccessDb();
   const sanitized = plans
     .filter((p) => p && p.name && p.days > 0 && p.price >= 0)
     .map((p, idx) => ({
@@ -371,13 +435,13 @@ export function updateTariffPlans(plans: TariffPlan[]): TariffPlan[] {
 
   if (sanitized.length > 0) {
     db.plans = sanitized;
-    saveDb(db);
+    await saveDb(db, kv);
   }
   return db.plans;
 }
 
-export function verifyAdminPassword(password: string): boolean {
-  const db = getAccessDb();
+export async function verifyAdminPassword(password: string): Promise<boolean> {
+  const db = await getAccessDb();
   if (!password) return false;
   if (!db.adminPasswordCustomized && process.env.ADMIN_PASSWORD && password === process.env.ADMIN_PASSWORD) {
     return true;
@@ -385,11 +449,12 @@ export function verifyAdminPassword(password: string): boolean {
   return hashPassword(password) === db.adminPasswordHash;
 }
 
-export function changeAdminPassword(newPassword: string): boolean {
+export async function changeAdminPassword(newPassword: string): Promise<boolean> {
   if (!newPassword || newPassword.trim().length < 4) return false;
-  const db = getAccessDb();
+  const kv = await getKvNamespace();
+  const db = await getAccessDb();
   db.adminPasswordHash = hashPassword(newPassword.trim());
   db.adminPasswordCustomized = true;
-  saveDb(db);
+  await saveDb(db, kv);
   return true;
 }

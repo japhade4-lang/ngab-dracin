@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
     }
 
     const userAgent = req.headers.get('user-agent') || 'Unknown';
-    const result = redeemVoucherCode(code, deviceId, userAgent);
+    const result = await redeemVoucherCode(code, deviceId, userAgent);
 
     if (!result.ok) {
       return NextResponse.json({ success: false, error: result.error }, { status: 400 });

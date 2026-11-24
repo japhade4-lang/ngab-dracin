@@ -20,6 +20,12 @@
 	"images": {
 		"binding": "IMAGES"
 	},
+	"kv_namespaces": [
+		{
+			"binding": "DRACIN_ACCESS_KV",
+			"id": "035914b8dc914e8f8b9671c4a998fe59"
+		}
+	],
 	"vars": {
 		"DRAMABUZZ_KEY": "B6860FC6979E745EF0C85B5E3496B5D2",
 		"NEXT_PUBLIC_DRAMABUZZ_KEY": "B6860FC6979E745EF0C85B5E3496B5D2"

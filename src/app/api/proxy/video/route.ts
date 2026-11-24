@@ -5,17 +5,23 @@ import path from 'path';
 
 const VPS_CACHE_DIR = '/var/cache/nginx/dracin_videos';
 
-function getCacheDir(): string {
-  if (fs.existsSync(VPS_CACHE_DIR)) {
-    return VPS_CACHE_DIR;
+function getCacheDir(): string | null {
+  // Skip filesystem entirely when running on Cloudflare Workers
+  if (typeof (globalThis as Record<string, unknown>).WebSocketPair !== 'undefined') {
+    return null;
   }
-  const localDir = path.join(process.cwd(), '.video_cache');
-  if (!fs.existsSync(localDir)) {
-    try {
+  try {
+    if (fs.existsSync(VPS_CACHE_DIR)) {
+      return VPS_CACHE_DIR;
+    }
+    const localDir = path.join(process.cwd(), '.video_cache');
+    if (!fs.existsSync(localDir)) {
       fs.mkdirSync(localDir, { recursive: true });
-    } catch {}
+    }
+    return localDir;
+  } catch {
+    return null;
   }
-  return localDir;
 }
 
 export async function GET(req: NextRequest) {
@@ -103,30 +109,34 @@ export async function GET(req: NextRequest) {
 
     if (isTsSegment) {
       const urlHash = crypto.createHash('md5').update(url).digest('hex');
-      const cachedFilePath = path.join(cacheDir, `${urlHash}.ts`);
+      const cachedFilePath = cacheDir ? path.join(cacheDir, `${urlHash}.ts`) : null;
 
-      if (fs.existsSync(cachedFilePath)) {
-        if (isVpsNginx) {
-          return new NextResponse(null, {
-            status: 200,
-            headers: {
-              'X-Accel-Redirect': `/internal-video-cache/${urlHash}.ts`,
-              'Content-Type': 'video/MP2T',
-              'Access-Control-Allow-Origin': '*',
-              'Cache-Control': 'public, max-age=604800, immutable',
-            },
-          });
-        }
-        const buf = await fs.promises.readFile(cachedFilePath);
-        return new NextResponse(buf as unknown as BodyInit, {
-          status: 200,
-          headers: {
-            'Content-Type': 'video/MP2T',
-            'Content-Length': String(buf.byteLength),
-            'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'public, max-age=604800, immutable',
-          },
-        });
+      if (cachedFilePath) {
+        try {
+          if (fs.existsSync(cachedFilePath)) {
+            if (isVpsNginx) {
+              return new NextResponse(null, {
+                status: 200,
+                headers: {
+                  'X-Accel-Redirect': `/internal-video-cache/${urlHash}.ts`,
+                  'Content-Type': 'video/MP2T',
+                  'Access-Control-Allow-Origin': '*',
+                  'Cache-Control': 'public, max-age=604800, immutable',
+                },
+              });
+            }
+            const buf = await fs.promises.readFile(cachedFilePath);
+            return new NextResponse(buf as unknown as BodyInit, {
+              status: 200,
+              headers: {
+                'Content-Type': 'video/MP2T',
+                'Content-Length': String(buf.byteLength),
+                'Access-Control-Allow-Origin': '*',
+                'Cache-Control': 'public, max-age=604800, immutable',
+              },
+            });
+          }
+        } catch {}
       }
 
       const upstreamRes = await fetch(url, { headers: forwardHeaders });
@@ -135,12 +145,14 @@ export async function GET(req: NextRequest) {
       }
       const buffer = Buffer.from(await upstreamRes.arrayBuffer());
 
-      // Save to disk cache asynchronously in background without blocking the client response
-      const tempPath = `${cachedFilePath}.tmp.${Date.now()}`;
-      fs.promises
-        .writeFile(tempPath, buffer)
-        .then(() => fs.promises.rename(tempPath, cachedFilePath))
-        .catch(() => {});
+      // Save to disk cache asynchronously in background on Node/VPS only
+      if (cachedFilePath) {
+        const tempPath = `${cachedFilePath}.tmp.${Date.now()}`;
+        fs.promises
+          .writeFile(tempPath, buffer)
+          .then(() => fs.promises.rename(tempPath, cachedFilePath))
+          .catch(() => {});
+      }
 
       return new NextResponse(buffer as unknown as BodyInit, {
         status: 200,
@@ -157,18 +169,22 @@ export async function GET(req: NextRequest) {
     // 3. MP4 FALLBACK PROXY (Zero-stall Range forwarding with strict Content-Length)
     // =========================================================================
     const urlHash = crypto.createHash('md5').update(url).digest('hex');
-    const cachedMp4Path = path.join(cacheDir, `${urlHash}.mp4`);
+    const cachedMp4Path = cacheDir ? path.join(cacheDir, `${urlHash}.mp4`) : null;
 
-    if (fs.existsSync(cachedMp4Path) && isVpsNginx) {
-      return new NextResponse(null, {
-        status: 200,
-        headers: {
-          'X-Accel-Redirect': `/internal-video-cache/${urlHash}.mp4`,
-          'Content-Type': 'video/mp4',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=604800, immutable',
-        },
-      });
+    if (cachedMp4Path && isVpsNginx) {
+      try {
+        if (fs.existsSync(cachedMp4Path)) {
+          return new NextResponse(null, {
+            status: 200,
+            headers: {
+              'X-Accel-Redirect': `/internal-video-cache/${urlHash}.mp4`,
+              'Content-Type': 'video/mp4',
+              'Access-Control-Allow-Origin': '*',
+              'Cache-Control': 'public, max-age=604800, immutable',
+            },
+          });
+        }
+      } catch {}
     }
 
     // Never block waiting for full 25MB+ MP4 download: forward exact Range chunk directly!
