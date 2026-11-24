@@ -1,34 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 
-// In-memory cache for HLS playlists and .ts video chunks to prevent any stutter
-interface CacheEntry {
-  body: Buffer | string;
-  contentType: string;
-  status: number;
-  timestamp: number;
-}
-
-const memoryCache = new Map<string, CacheEntry>();
-const MAX_CACHE_ITEMS = 120; // Stores up to ~100MB of hot video segments in VPS RAM
-
-function getCached(key: string): CacheEntry | null {
-  const item = memoryCache.get(key);
-  if (!item) return null;
-  // Expire after 2 hours
-  if (Date.now() - item.timestamp > 2 * 3600 * 1000) {
-    memoryCache.delete(key);
-    return null;
+// Get appropriate cache directory for VPS or local development
+function getCacheDir(): string {
+  const vpsCacheDir = '/var/cache/nginx/dracin_videos';
+  if (fs.existsSync(vpsCacheDir)) {
+    return vpsCacheDir;
   }
-  return item;
-}
-
-function setCached(key: string, entry: CacheEntry) {
-  if (memoryCache.size >= MAX_CACHE_ITEMS) {
-    // Delete oldest entry
-    const oldestKey = memoryCache.keys().next().value;
-    if (oldestKey) memoryCache.delete(oldestKey);
+  const localDir = path.join(process.cwd(), '.video_cache');
+  if (!fs.existsSync(localDir)) {
+    try {
+      fs.mkdirSync(localDir, { recursive: true });
+    } catch {}
   }
-  memoryCache.set(key, entry);
+  return localDir;
 }
 
 export async function GET(req: NextRequest) {
@@ -37,26 +24,6 @@ export async function GET(req: NextRequest) {
 
   if (!url) {
     return new NextResponse('Missing url parameter', { status: 400 });
-  }
-
-  const range = req.headers.get('range');
-  const cacheKey = `${url}_${range || 'full'}`;
-
-  // Check in-memory cache for fast instant delivery (0ms)
-  const cached = getCached(cacheKey);
-  if (cached) {
-    const resHeaders = new Headers();
-    resHeaders.set('Access-Control-Allow-Origin', '*');
-    resHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    resHeaders.set('Access-Control-Allow-Headers', 'Range, Content-Type');
-    resHeaders.set('Accept-Ranges', 'bytes');
-    resHeaders.set('Content-Type', cached.contentType);
-    resHeaders.set('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
-    resHeaders.set('X-Proxy-Cache', 'HIT');
-    return new NextResponse(cached.body as unknown as BodyInit, {
-      status: cached.status,
-      headers: resHeaders,
-    });
   }
 
   try {
@@ -75,26 +42,18 @@ export async function GET(req: NextRequest) {
       Accept: '*/*',
     };
 
-    if (range) {
-      forwardHeaders['range'] = range;
-    }
+    const isM3U8 = url.includes('.m3u8');
+    const isTsSegment = url.includes('.ts');
 
-    const upstreamResponse = await fetch(url, {
-      headers: forwardHeaders,
-    });
+    // =========================================================================
+    // 1. HLS PLAYLIST REWRITING (.m3u8)
+    // =========================================================================
+    if (isM3U8) {
+      const upstreamResponse = await fetch(url, { headers: forwardHeaders });
+      if (!upstreamResponse.ok) {
+        return new NextResponse('Failed to fetch m3u8 playlist', { status: upstreamResponse.status });
+      }
 
-    const responseHeaders = new Headers();
-    responseHeaders.set('Access-Control-Allow-Origin', '*');
-    responseHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    responseHeaders.set('Access-Control-Allow-Headers', 'Range, Content-Type');
-    responseHeaders.set('Accept-Ranges', 'bytes');
-    responseHeaders.set('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
-    responseHeaders.set('X-Proxy-Cache', 'MISS');
-
-    const contentType = upstreamResponse.headers.get('content-type') || 'video/mp4';
-
-    // If this is an HLS playlist (.m3u8), rewrite relative segment paths to proxy URLs
-    if (url.includes('.m3u8') || contentType.includes('mpegurl') || contentType.includes('application/x-mpegURL')) {
       const playlistText = await upstreamResponse.text();
       const parsedUrl = new URL(url);
       const basePath = url.substring(0, url.lastIndexOf('/') + 1);
@@ -104,7 +63,6 @@ export async function GET(req: NextRequest) {
         const trimmed = line.trim();
         if (!trimmed) return line;
 
-        // Header comments and directives
         if (trimmed.startsWith('#')) {
           if (trimmed.includes('URI="')) {
             return trimmed.replace(/URI="([^"]+)"/, (_, uri) => {
@@ -115,7 +73,6 @@ export async function GET(req: NextRequest) {
           return line;
         }
 
-        // Segment URI line
         let segmentAbsoluteUrl = trimmed;
         if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
           segmentAbsoluteUrl = `${basePath}${trimmed}${searchParams}`;
@@ -126,56 +83,115 @@ export async function GET(req: NextRequest) {
         return `/api/proxy/video?url=${encodeURIComponent(segmentAbsoluteUrl)}&source=${source}`;
       });
 
-      const rewrittenContent = rewrittenLines.join('\n');
-      responseHeaders.set('Content-Type', 'application/vnd.apple.mpegurl');
-
-      setCached(cacheKey, {
-        body: rewrittenContent,
-        contentType: 'application/vnd.apple.mpegurl',
+      const resHeaders = new Headers();
+      resHeaders.set('Content-Type', 'application/vnd.apple.mpegurl');
+      resHeaders.set('Access-Control-Allow-Origin', '*');
+      resHeaders.set('Cache-Control', 'public, max-age=3600');
+      return new NextResponse(rewrittenLines.join('\n'), {
         status: 200,
-        timestamp: Date.now(),
-      });
-
-      return new NextResponse(rewrittenContent, {
-        status: 200,
-        headers: responseHeaders,
+        headers: resHeaders,
       });
     }
 
-    // Binary stream (e.g. .ts segment or .mp4)
-    responseHeaders.set('Content-Type', contentType);
+    // =========================================================================
+    // 2. VIDEO SEGMENTS (.ts) & STANDALONE VIDEOS (.mp4)
+    // =========================================================================
+    // Generate unique MD5 hash for the URL (stripping ephemeral auth params for cache reuse if desired)
+    const urlHash = crypto.createHash('md5').update(url).digest('hex');
+    const ext = isTsSegment ? '.ts' : '.mp4';
+    const cacheDir = getCacheDir();
+    const cachedFilePath = path.join(cacheDir, `${urlHash}${ext}`);
+    const mimeType = isTsSegment ? 'video/MP2T' : 'video/mp4';
 
-    const contentLength = upstreamResponse.headers.get('content-length');
-    if (contentLength) {
-      responseHeaders.set('Content-Length', contentLength);
+    // If file is not yet cached locally on VPS SSD, download it once at full 80MB/s line rate
+    if (!fs.existsSync(cachedFilePath)) {
+      const downloadRes = await fetch(url, { headers: forwardHeaders });
+      if (downloadRes.ok) {
+        const buffer = Buffer.from(await downloadRes.arrayBuffer());
+        try {
+          const tempPath = `${cachedFilePath}.tmp.${Date.now()}`;
+          fs.writeFileSync(tempPath, buffer);
+          fs.renameSync(tempPath, cachedFilePath);
+        } catch (e) {
+          console.warn('[Video Cache] Could not write cache file:', e);
+        }
+      }
     }
+
+    // Check if we now have the local cached file
+    if (fs.existsSync(cachedFilePath)) {
+      const stat = fs.statSync(cachedFilePath);
+      const fileSize = stat.size;
+      const rangeHeader = req.headers.get('range');
+
+      let start = 0;
+      let end = fileSize - 1;
+      let status = 200;
+
+      if (rangeHeader) {
+        const parts = rangeHeader.replace(/bytes=/, '').split('-');
+        start = parseInt(parts[0], 10);
+        end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+        if (end >= fileSize) end = fileSize - 1;
+        status = 206;
+      }
+
+      const chunkSize = end - start + 1;
+      const fd = fs.openSync(cachedFilePath, 'r');
+      const chunkBuffer = Buffer.alloc(chunkSize);
+      fs.readSync(fd, chunkBuffer, 0, chunkSize, start);
+      fs.closeSync(fd);
+
+      const resHeaders = new Headers();
+      resHeaders.set('Content-Type', mimeType);
+      resHeaders.set('Content-Length', String(chunkSize));
+      resHeaders.set('Accept-Ranges', 'bytes');
+      resHeaders.set('Access-Control-Allow-Origin', '*');
+      resHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+      resHeaders.set('Access-Control-Allow-Headers', 'Range, Content-Type');
+      resHeaders.set('Cache-Control', 'public, max-age=604800, immutable');
+      resHeaders.set('X-Proxy-Cache', 'HIT');
+
+      if (status === 206) {
+        resHeaders.set('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+      }
+
+      // Return real Buffer with Content-Length header so browser never receives 'Transfer-Encoding: chunked'
+      return new NextResponse(chunkBuffer as unknown as BodyInit, {
+        status,
+        headers: resHeaders,
+      });
+    }
+
+    // =========================================================================
+    // 3. FALLBACK: LIVE PROXY WITH STRICT CONTENT-LENGTH
+    // =========================================================================
+    const range = req.headers.get('range');
+    if (range) {
+      forwardHeaders['range'] = range;
+    }
+
+    const upstreamResponse = await fetch(url, { headers: forwardHeaders });
+    const buffer = Buffer.from(await upstreamResponse.arrayBuffer());
+
+    const fallbackHeaders = new Headers();
+    fallbackHeaders.set('Content-Type', mimeType);
+    fallbackHeaders.set('Content-Length', String(buffer.byteLength));
+    fallbackHeaders.set('Accept-Ranges', 'bytes');
+    fallbackHeaders.set('Access-Control-Allow-Origin', '*');
+    fallbackHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    fallbackHeaders.set('Access-Control-Allow-Headers', 'Range, Content-Type');
+    fallbackHeaders.set('Cache-Control', 'public, max-age=86400');
+    fallbackHeaders.set('X-Proxy-Cache', 'PASS');
 
     const contentRange = upstreamResponse.headers.get('content-range');
     if (contentRange) {
-      responseHeaders.set('Content-Range', contentRange);
+      fallbackHeaders.set('Content-Range', contentRange);
     }
 
-    // If this is a .ts segment (typically < 3MB), cache it in memory
-    const isTsSegment = url.includes('.ts') || contentType.includes('MP2T');
-    if (isTsSegment && upstreamResponse.ok) {
-      const buffer = await upstreamResponse.arrayBuffer();
-      const nodeBuf = Buffer.from(buffer);
-      setCached(cacheKey, {
-        body: nodeBuf,
-        contentType,
-        status: upstreamResponse.status,
-        timestamp: Date.now(),
-      });
-      return new NextResponse(nodeBuf as unknown as BodyInit, {
-        status: upstreamResponse.status,
-        headers: responseHeaders,
-      });
-    }
-
-    // For larger streams (e.g. direct mp4 or ranges)
-    return new NextResponse(upstreamResponse.body, {
+    return new NextResponse(buffer as unknown as BodyInit, {
       status: upstreamResponse.status,
-      headers: responseHeaders,
+      headers: fallbackHeaders,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Proxy fetch failed';

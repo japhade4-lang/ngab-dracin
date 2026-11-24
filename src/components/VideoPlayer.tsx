@@ -228,9 +228,22 @@ export default function VideoPlayer({
       }
     };
 
-    const handleWaiting = () => setIsLoading(true);
-    const handleCanPlay = () => setIsLoading(false);
+    let waitingTimeout: NodeJS.Timeout | null = null;
+
+    const handleWaiting = () => {
+      if (waitingTimeout) clearTimeout(waitingTimeout);
+      waitingTimeout = setTimeout(() => {
+        setIsLoading(true);
+      }, 600);
+    };
+
+    const handleCanPlay = () => {
+      if (waitingTimeout) clearTimeout(waitingTimeout);
+      setIsLoading(false);
+    };
+
     const handlePlaying = () => {
+      if (waitingTimeout) clearTimeout(waitingTimeout);
       setIsPlaying(true);
       setIsLoading(false);
     };
@@ -267,6 +280,7 @@ export default function VideoPlayer({
       video.removeEventListener('error', handleError);
 
       clearTimeout(safetyTimer);
+      if (waitingTimeout) clearTimeout(waitingTimeout);
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
@@ -335,6 +349,33 @@ export default function VideoPlayer({
       document.exitFullscreen().catch(() => {});
     }
   };
+
+  // Keyboard controls like YouTube (Space = play/pause, ArrowLeft/Right = seek 10s, F = fullscreen, M = mute)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) {
+        return;
+      }
+      if (e.code === 'Space') {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.code === 'ArrowLeft') {
+        e.preventDefault();
+        skipSeconds(-10);
+      } else if (e.code === 'ArrowRight') {
+        e.preventDefault();
+        skipSeconds(10);
+      } else if (e.code === 'KeyF') {
+        e.preventDefault();
+        toggleFullscreen();
+      } else if (e.code === 'KeyM') {
+        e.preventDefault();
+        toggleMute();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isPlaying, isMuted]);
 
   const changeSpeed = (speed: number) => {
     setPlaybackSpeed(speed);
