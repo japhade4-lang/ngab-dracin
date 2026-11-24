@@ -122,8 +122,14 @@ export async function GET(req: NextRequest) {
     if (fs.existsSync(cachedFilePath)) {
       // If running on VPS with NGINX, redirect to native NGINX sendfile route for zero-copy, hardware-accelerated streaming without chunked encoding
       if (cacheDir === '/var/cache/nginx/dracin_videos') {
-        const redirectUrl = new URL(`/video-cache/${urlHash}${ext}`, req.url);
-        return NextResponse.redirect(redirectUrl, 302);
+        return new NextResponse(null, {
+          status: 302,
+          headers: {
+            Location: `/video-cache/${urlHash}${ext}`,
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=604800, immutable',
+          },
+        });
       }
 
       const stat = fs.statSync(cachedFilePath);
