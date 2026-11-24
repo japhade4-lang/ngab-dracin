@@ -1,10 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { isServerEpisodeAllowed } from '@/lib/accessAuth';
+
+export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
   const searchParams = req.nextUrl.searchParams;
   let videoUrl = searchParams.get('url');
   const title = searchParams.get('title') || 'Drama';
   const episode = searchParams.get('episode') || '1';
+  const epNum = parseInt(episode, 10) || 1;
+
+  const { allowed } = await isServerEpisodeAllowed(epNum);
+  if (!allowed) {
+    return new NextResponse('Akses berlangganan diperlukan untuk mengunduh episode ini.', {
+      status: 403,
+    });
+  }
 
   if (!videoUrl) {
     return new NextResponse('Missing url parameter', { status: 400 });

@@ -4,7 +4,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Drama, Episode } from '@/types/drama';
+import { PublicAccessStatus } from '@/types/access';
 import VideoPlayer from '@/components/VideoPlayer';
+import PaywallGate, { formatRemainingTime } from '@/components/PaywallGate';
 import { useAppStore } from '@/lib/store';
 import {
   ChevronLeft,
@@ -15,18 +17,24 @@ import {
   Volume2,
   Download,
   Loader2,
+  Lock,
+  Crown,
 } from 'lucide-react';
 
 interface Props {
   drama: Drama;
   currentEpisodeNumber: number;
   streamData: Episode;
+  isLocked: boolean;
+  accessStatus: PublicAccessStatus;
 }
 
 export default function WatchScreenClient({
   drama,
   currentEpisodeNumber,
   streamData,
+  isLocked,
+  accessStatus,
 }: Props) {
   const router = useRouter();
   const updateHistory = useAppStore((s) => s.updateHistory);
@@ -54,11 +62,8 @@ export default function WatchScreenClient({
   const [currentVideoUrl, setCurrentVideoUrl] = useState(streamData.videoUrl || '');
   const [isDownloading, setIsDownloading] = useState(false);
 
-  // Synchronize active video URL directly from genuine streamData
   useEffect(() => {
-    if (streamData?.videoUrl) {
-      setCurrentVideoUrl(streamData.videoUrl);
-    }
+    setCurrentVideoUrl(streamData?.videoUrl || '');
   }, [streamData?.videoUrl, currentEpisodeNumber]);
 
   const toggleFavorite = () => {
@@ -77,7 +82,7 @@ export default function WatchScreenClient({
   };
 
   const handleDownload = () => {
-    if (!currentVideoUrl) return;
+    if (!currentVideoUrl || isLocked) return;
     setIsDownloading(true);
     try {
       const cleanTitle = drama.title.replace(/[^\w\s-]/gi, '').trim().replace(/\s+/g, '_');
@@ -99,7 +104,6 @@ export default function WatchScreenClient({
     }
   };
 
-  // Throttled history persistence (every 3s max) to keep playback 100% smooth
   const handleTimeUpdate = useCallback(
     (currentTime: number, duration: number) => {
       const now = Date.now();
@@ -135,8 +139,8 @@ export default function WatchScreenClient({
       <div className="flex flex-col lg:flex-row gap-4 sm:gap-6">
         {/* Main Player Column */}
         <div className="flex-1 space-y-3 sm:space-y-4">
-          {/* Back Navigation & Breadcrumb */}
-          <div className="flex items-center justify-between text-xs sm:text-sm text-gray-400 px-0.5">
+          {/* Top Breadcrumb + Access Status Pill */}
+          <div className="flex items-center justify-between text-xs sm:text-sm text-gray-400 px-0.5 gap-2">
             <Link
               href={`/drama/${drama.source}/${drama.id}`}
               className="flex items-center gap-1 hover:text-white transition-colors"
@@ -145,69 +149,95 @@ export default function WatchScreenClient({
               <span>Detail Drama</span>
             </Link>
 
-            <span className="text-gray-400 text-xs">
-              Ep {currentEpisodeNumber} / {totalEpisodes}
-            </span>
+            <div className="flex items-center gap-2">
+              {accessStatus.hasAccess ? (
+                <Link
+                  href="/akses"
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-[10px] sm:text-xs font-semibold text-emerald-400"
+                >
+                  <Crown className="h-3 w-3" />
+                  <span>VIP ({formatRemainingTime(accessStatus.remainingMs)})</span>
+                </Link>
+              ) : (
+                <Link
+                  href="/akses"
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/30 text-[10px] sm:text-xs font-semibold text-rose-300 hover:bg-rose-500/25"
+                >
+                  <Crown className="h-3 w-3" />
+                  <span>Gratis Ep 1–{accessStatus.freeEpisodes} • Akses 5k/hari</span>
+                </Link>
+              )}
+              <span className="text-gray-400 text-xs">
+                Ep {currentEpisodeNumber}/{totalEpisodes}
+              </span>
+            </div>
           </div>
 
-          {/* Video Player */}
-          <VideoPlayer
-            key={`${drama.source}-${drama.id}-${currentEpisodeNumber}`}
-            url={currentVideoUrl}
-            source={drama.source}
-            title={drama.title}
-            episodeNumber={currentEpisodeNumber}
-            initialTime={initialResumeTime}
-            qualities={streamData.qualities}
-            subtitles={streamData.subtitles}
-            onTimeUpdate={handleTimeUpdate}
-            onEnded={handleEnded}
-            onActiveUrlChange={setCurrentVideoUrl}
-          />
+          {/* Locked Paywall OR Active Video Player */}
+          {isLocked ? (
+            <PaywallGate
+              accessStatus={accessStatus}
+              lockedEpisode={currentEpisodeNumber}
+              dramaTitle={drama.title}
+            />
+          ) : (
+            <VideoPlayer
+              key={`${drama.source}-${drama.id}-${currentEpisodeNumber}`}
+              url={currentVideoUrl}
+              source={drama.source}
+              title={drama.title}
+              episodeNumber={currentEpisodeNumber}
+              initialTime={initialResumeTime}
+              qualities={streamData.qualities}
+              subtitles={streamData.subtitles}
+              onTimeUpdate={handleTimeUpdate}
+              onEnded={handleEnded}
+              onActiveUrlChange={setCurrentVideoUrl}
+            />
+          )}
 
-          {/* Navigation Controls: Prev / Next / Download / Favorite buttons */}
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white/5 border border-white/5 p-3 sm:p-4">
+          {/* Navigation Controls */}
+          <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl bg-white/5 border border-white/5 p-3 sm:p-4">
             <div className="flex items-center gap-2">
               {hasPrev ? (
                 <Link
                   href={`/watch/${drama.source}/${drama.id}/${currentEpisodeNumber - 1}`}
-                  className="flex items-center gap-1.5 rounded-lg bg-white/10 hover:bg-white/20 px-3 py-2 text-xs sm:text-sm font-semibold text-white transition-all"
+                  className="flex items-center gap-1 rounded-lg bg-white/10 hover:bg-white/20 px-3 py-2 text-xs sm:text-sm font-semibold text-white transition-all"
                 >
                   <ChevronLeft className="h-4 w-4" />
-                  <span>Episode Sebelumnya</span>
+                  <span>Sebelumnya</span>
                 </Link>
               ) : (
-                <span className="text-xs text-gray-500 px-3 py-2">Episode Pertama</span>
+                <span className="text-xs text-gray-500 px-2 py-2">Episode 1</span>
               )}
 
               {hasNext && (
                 <Link
                   href={`/watch/${drama.source}/${drama.id}/${currentEpisodeNumber + 1}`}
-                  className="flex items-center gap-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 px-4 py-2 text-xs sm:text-sm font-bold text-white shadow-lg shadow-rose-600/30 transition-all"
+                  className="flex items-center gap-1 rounded-lg bg-rose-600 hover:bg-rose-500 px-3.5 py-2 text-xs sm:text-sm font-bold text-white shadow-lg shadow-rose-600/30 transition-all"
                 >
-                  <span>Episode Selanjutnya</span>
+                  <span>Selanjutnya</span>
                   <ChevronRight className="h-4 w-4" />
                 </Link>
               )}
             </div>
 
             <div className="flex items-center gap-2">
-              {/* Unduh Episode Button */}
-              <button
-                onClick={handleDownload}
-                disabled={isDownloading}
-                className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs sm:text-sm font-semibold bg-white/10 hover:bg-white/20 border border-white/10 text-white transition-all disabled:opacity-50"
-                title="Unduh Episode MP4 via Dracin API / CDN"
-              >
-                {isDownloading ? (
-                  <Loader2 className="h-4 w-4 animate-spin text-rose-400" />
-                ) : (
-                  <Download className="h-4 w-4 text-rose-400" />
-                )}
-                <span>{isDownloading ? 'Menyiapkan...' : 'Simpan Offline (Opsional)'}</span>
-              </button>
+              {!isLocked && (
+                <button
+                  onClick={handleDownload}
+                  disabled={isDownloading}
+                  className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs sm:text-sm font-semibold bg-white/10 hover:bg-white/20 border border-white/10 text-white transition-all disabled:opacity-50"
+                >
+                  {isDownloading ? (
+                    <Loader2 className="h-4 w-4 animate-spin text-rose-400" />
+                  ) : (
+                    <Download className="h-4 w-4 text-rose-400" />
+                  )}
+                  <span className="hidden sm:inline">{isDownloading ? 'Menyiapkan...' : 'Unduh'}</span>
+                </button>
+              )}
 
-              {/* Bookmark Button */}
               <button
                 onClick={toggleFavorite}
                 className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs sm:text-sm font-semibold border transition-all ${
@@ -232,10 +262,10 @@ export default function WatchScreenClient({
           </div>
 
           {/* Drama Title & Info Card */}
-          <div className="rounded-xl bg-white/5 border border-white/5 p-4 sm:p-6 space-y-3">
+          <div className="rounded-xl bg-white/5 border border-white/5 p-4 space-y-2">
             <div className="flex flex-wrap items-center gap-2">
               {drama.isDubbed && (
-                <span className="flex items-center gap-1 rounded bg-rose-600 px-2 py-0.5 text-[10px] font-bold text-white shadow">
+                <span className="flex items-center gap-1 rounded bg-rose-600 px-2 py-0.5 text-[10px] font-bold text-white">
                   <Volume2 className="h-3 w-3" />
                   DUB INDO
                 </span>
@@ -243,22 +273,17 @@ export default function WatchScreenClient({
               <span className="rounded bg-white/10 px-2 py-0.5 text-[10px] uppercase font-semibold text-gray-300">
                 {drama.source}
               </span>
-              <span className="rounded bg-rose-950/60 border border-rose-800/40 text-rose-300 px-2 py-0.5 text-[10px] font-semibold">
-                720p HD MP4 / HLS
-              </span>
             </div>
 
-            <h1 className="text-xl sm:text-2xl font-bold text-white">
+            <h1 className="text-lg sm:text-xl font-bold text-white">
               {drama.title} - Episode {currentEpisodeNumber}
             </h1>
 
-            <p className="text-xs sm:text-sm text-gray-300 leading-relaxed">
-              {drama.intro}
-            </p>
+            <p className="text-xs sm:text-sm text-gray-300 leading-relaxed">{drama.intro}</p>
           </div>
         </div>
 
-        {/* Sidebar: Episode Selector Drawer */}
+        {/* Sidebar: Episode Selector */}
         <div className="w-full lg:w-80 flex-shrink-0 space-y-4">
           <div className="rounded-2xl bg-white/5 border border-white/5 p-4 sticky top-20">
             <div className="flex items-center justify-between border-b border-white/10 pb-3 mb-3">
@@ -266,24 +291,27 @@ export default function WatchScreenClient({
                 <ListVideo className="h-4 w-4 text-rose-500" />
                 Daftar Episode
               </h3>
-              <span className="text-xs text-gray-400">Total {totalEpisodes}</span>
+              <span className="text-xs text-gray-400">{totalEpisodes} Eps</span>
             </div>
 
-            {/* Scrollable Episode List */}
             <div className="max-h-[420px] sm:max-h-[500px] overflow-y-auto no-scrollbar grid grid-cols-5 sm:grid-cols-6 lg:grid-cols-4 gap-2 pr-1">
               {episodes.map((epNum) => {
                 const isCurrent = epNum === currentEpisodeNumber;
+                const lockedEp = epNum > accessStatus.freeEpisodes && !accessStatus.hasAccess;
                 return (
                   <Link
                     key={epNum}
                     href={`/watch/${drama.source}/${drama.id}/${epNum}`}
-                    className={`flex items-center justify-center p-2.5 rounded-lg border text-xs font-bold transition-all ${
+                    className={`flex items-center justify-center gap-1 p-2.5 rounded-lg border text-xs font-bold transition-all ${
                       isCurrent
                         ? 'bg-rose-600 border-rose-500 text-white shadow-md shadow-rose-600/40'
-                        : 'bg-white/5 hover:bg-white/10 border-white/5 text-gray-300 hover:text-white'
+                        : lockedEp
+                        ? 'bg-white/[0.02] hover:bg-white/10 border-white/5 text-gray-500 hover:text-gray-300'
+                        : 'bg-white/5 hover:bg-white/10 border-white/5 text-gray-200 hover:text-white'
                     }`}
                   >
-                    {epNum}
+                    <span>{epNum}</span>
+                    {lockedEp && !isCurrent && <Lock className="h-2.5 w-2.5 text-rose-400/70" />}
                   </Link>
                 );
               })}

@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { isServerEpisodeAllowed } from '@/lib/accessAuth';
+
+export const dynamic = 'force-dynamic';
 
 const DRACIN_API_BASE = process.env.NEXT_PUBLIC_DRACIN_API_URL || 'https://dracinapi.com';
 
@@ -7,6 +10,14 @@ export async function GET(req: NextRequest) {
   const source = searchParams.get('source') || 'netshort';
   const dramaId = searchParams.get('dramaId') || '';
   const episode = parseInt(searchParams.get('episode') || '1', 10);
+
+  const { allowed, status } = await isServerEpisodeAllowed(episode);
+  if (!allowed) {
+    return NextResponse.json(
+      { success: false, locked: true, freeEpisodes: status.freeEpisodes, error: 'Akses episode terkunci' },
+      { status: 403 }
+    );
+  }
 
   // Retrieve API key from request headers, query param, or server environment
   const apiKey =

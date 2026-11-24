@@ -1,8 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getServerAccessStatus } from '@/lib/accessAuth';
+
+export const dynamic = 'force-dynamic';
 
 const DRACIN_API_BASE = process.env.NEXT_PUBLIC_DRACIN_API_URL || 'https://dracinapi.com';
 
 export async function GET(req: NextRequest) {
+  const status = await getServerAccessStatus();
+  if (!status.hasAccess) {
+    return NextResponse.json(
+      { success: false, locked: true, error: 'Akses VIP aktif diperlukan.' },
+      { status: 403 }
+    );
+  }
+
   const searchParams = req.nextUrl.searchParams;
   const source = searchParams.get('source') || 'netshort';
   const dramaId = searchParams.get('dramaId') || '';

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { fetchDramaStream } from '@/lib/api';
 import { DramaSource } from '@/types/drama';
+import { isServerEpisodeAllowed } from '@/lib/accessAuth';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,6 +12,19 @@ export async function GET(req: NextRequest) {
 
   if (!id) {
     return NextResponse.json({ success: false, error: 'Missing id' }, { status: 400 });
+  }
+
+  const { allowed, status } = await isServerEpisodeAllowed(ep);
+  if (!allowed) {
+    return NextResponse.json(
+      {
+        success: false,
+        locked: true,
+        freeEpisodes: status.freeEpisodes,
+        error: `Episode ${ep} terkunci. Aktivasi kode akses untuk menonton episode penuh.`,
+      },
+      { status: 403 }
+    );
   }
 
   try {

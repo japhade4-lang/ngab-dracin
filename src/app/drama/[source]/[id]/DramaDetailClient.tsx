@@ -3,14 +3,16 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { Drama } from '@/types/drama';
-import { Play, Bookmark, Check, Share2, Flame, Volume2, Sparkles } from 'lucide-react';
+import { PublicAccessStatus } from '@/types/access';
+import { Play, Bookmark, Check, Share2, Flame, Volume2, Sparkles, Lock, Crown } from 'lucide-react';
 import { useAppStore } from '@/lib/store';
 
 interface Props {
   drama: Drama;
+  accessStatus: PublicAccessStatus;
 }
 
-export default function DramaDetailClient({ drama }: Props) {
+export default function DramaDetailClient({ drama, accessStatus }: Props) {
   const { addFavorite, removeFavorite, isFavorite, getHistoryItem } = useAppStore();
   const bookmarked = isFavorite(drama.id);
   const historyItem = getHistoryItem(drama.id);
@@ -186,11 +188,22 @@ export default function DramaDetailClient({ drama }: Props) {
 
         {/* Episode Selector Section */}
         <div className="mt-12 space-y-4">
-          <div className="flex items-center justify-between border-b border-white/10 pb-3">
-            <h2 className="text-lg font-bold text-white flex items-center gap-2">
-              <Sparkles className="h-5 w-5 text-rose-500" />
-              Pilih Episode ({totalEpisodes})
-            </h2>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <Sparkles className="h-5 w-5 text-rose-500" />
+                Pilih Episode ({totalEpisodes})
+              </h2>
+              {!accessStatus.hasAccess && (
+                <Link
+                  href="/akses"
+                  className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/30 text-[11px] font-semibold text-rose-300 hover:bg-rose-500/25"
+                >
+                  <Crown className="h-3 w-3" />
+                  <span>Gratis Ep 1–{accessStatus.freeEpisodes} • VIP 5k/hari</span>
+                </Link>
+              )}
+            </div>
 
             {/* Range Pagination Tabs (e.g. 1-30, 31-60) */}
             {totalChunks > 1 && (
@@ -218,24 +231,30 @@ export default function DramaDetailClient({ drama }: Props) {
           </div>
 
           {/* Episode Grid */}
-          <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-10 gap-2.5 pt-2">
+          <div className="grid grid-cols-5 sm:grid-cols-6 md:grid-cols-10 gap-2 pt-2">
             {currentChunkEpisodes.map((epNum) => {
               const isWatched = historyItem && historyItem.episodeNumber >= epNum;
               const isCurrent = historyItem && historyItem.episodeNumber === epNum;
+              const isLockedEp = epNum > accessStatus.freeEpisodes && !accessStatus.hasAccess;
 
               return (
                 <Link
                   key={epNum}
                   href={`/watch/${drama.source}/${drama.id}/${epNum}`}
-                  className={`flex flex-col items-center justify-center p-3 rounded-xl border text-sm font-bold transition-all relative ${
+                  className={`flex flex-col items-center justify-center p-2.5 sm:p-3 rounded-xl border text-xs sm:text-sm font-bold transition-all relative ${
                     isCurrent
                       ? 'bg-rose-600 border-rose-500 text-white shadow-lg shadow-rose-600/30'
                       : isWatched
                       ? 'bg-white/10 border-rose-500/30 text-rose-300 hover:bg-white/15'
-                      : 'bg-white/5 hover:bg-white/10 border-white/5 text-gray-300 hover:text-white'
+                      : isLockedEp
+                      ? 'bg-white/[0.02] hover:bg-white/10 border-white/5 text-gray-500 hover:text-gray-200'
+                      : 'bg-white/5 hover:bg-white/10 border-white/5 text-gray-200 hover:text-white'
                   }`}
                 >
-                  <span>{epNum}</span>
+                  <div className="flex items-center gap-1">
+                    <span>{epNum}</span>
+                    {isLockedEp && <Lock className="h-3 w-3 text-rose-400/75" />}
+                  </div>
                   {isCurrent && (
                     <span className="text-[9px] font-normal text-rose-200">Terakhir</span>
                   )}

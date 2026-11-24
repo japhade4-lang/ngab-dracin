@@ -43,6 +43,10 @@ next-env.d.ts
 # OpenNext
 .open-next
 
+# database & local cache
+/data/
+/.video_cache/
+
 # wrangler files
 .wrangler
 .dev.vars*

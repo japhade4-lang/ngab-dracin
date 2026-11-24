@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Film, Flame, Sparkles, Search, Bookmark, Mic2 } from 'lucide-react';
+import { Film, Flame, Sparkles, Search, Bookmark, Mic2, Crown } from 'lucide-react';
 
 export default function Navbar() {
   const pathname = usePathname();
@@ -52,15 +52,29 @@ export default function Navbar() {
           </nav>
         </div>
 
-        {/* Right Search Action */}
-        <Link
-          href="/search"
-          className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 hover:text-white text-xs sm:text-sm whitespace-nowrap shrink-0 transition-all"
-        >
-          <Search className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-rose-500 shrink-0" />
-          <span className="hidden sm:inline">Cari Drama</span>
-          <span className="sm:hidden">Cari</span>
-        </Link>
+        {/* Right Actions: Access Pass + Search */}
+        <div className="flex items-center gap-2 shrink-0">
+          <Link
+            href="/akses"
+            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-all ${
+              pathname === '/akses'
+                ? 'bg-rose-600 text-white'
+                : 'bg-rose-600/20 hover:bg-rose-600/35 border border-rose-500/35 text-rose-300'
+            }`}
+          >
+            <Crown className="h-3.5 w-3.5 shrink-0" />
+            <span>Akses 5k</span>
+          </Link>
+
+          <Link
+            href="/search"
+            className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 hover:text-white text-xs sm:text-sm whitespace-nowrap shrink-0 transition-all"
+          >
+            <Search className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-rose-500 shrink-0" />
+            <span className="hidden sm:inline">Cari Drama</span>
+            <span className="sm:hidden">Cari</span>
+          </Link>
+        </div>
       </div>
     </header>
   );
